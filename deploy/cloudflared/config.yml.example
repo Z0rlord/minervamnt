@@ -1,0 +1,12 @@
+# Copy to /etc/cloudflared/config.yml after: cloudflared tunnel login && cloudflared tunnel create minervamnt
+#
+# Replace <TUNNEL_ID> with the UUID from `cloudflared tunnel list`.
+# Credentials JSON lives at ~/.cloudflared/<TUNNEL_ID>.json (copy to /etc/cloudflared/ for systemd).
+
+tunnel: <TUNNEL_ID>
+credentials-file: /etc/cloudflared/<TUNNEL_ID>.json
+
+ingress:
+  - hostname: minervamnt.xyz
+    service: http://localhost:3338
+  - service: http_status:404

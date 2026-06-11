@@ -11,7 +11,7 @@ default_vtxo_expiry = 25920
 
 [bitcoin]
 # Override with BITCOIN_RPC_URL env (Pi Tailscale IP)
-rpc_url = "http://127.0.0.1:8332"
+rpc_url = "http://100.75.188.125:8332"
 
 [liquidity]
 min_vtxo_reserve_msat = 1_000_000_000

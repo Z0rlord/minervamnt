@@ -291,6 +291,7 @@ fn parse_ts(value: &str) -> DateTime<Utc> {
 mod tests {
     use super::*;
     use crate::ark_client::MockArkClient;
+    use uuid::Uuid;
 
     fn sample_vtxo(amount: u64) -> Vtxo {
         MockArkClient::new("02abc", 800_000)

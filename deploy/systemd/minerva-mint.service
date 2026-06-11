@@ -1,0 +1,27 @@
+[Unit]
+Description=Minerva Mint — Ark-backed Cashu mint
+Documentation=https://github.com/Z0rlord/minervamnt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minerva
+Group=minerva
+WorkingDirectory=/opt/minervamnt
+EnvironmentFile=/opt/minervamnt/.env
+ExecStart=/opt/minervamnt/target/release/minerva-mint
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minerva-mint
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/minervamnt/data
+
+[Install]
+WantedBy=multi-user.target
