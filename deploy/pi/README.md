@@ -67,7 +67,7 @@ Ensure `.env` on the Pi has `BITCOIN_RPC_PASSWORD` from `/etc/bitcoin/rpc-creden
 To serve a static page at minervamnt.xyz without the mint API:
 
 ```bash
-cd /opt/minervamnt && git pull
+cd /opt/minervamnt && git pull origin main
 bash deploy/pi/enable-landing-mode.sh
 ```
 
@@ -76,3 +76,19 @@ Re-enable mint API:
 ```bash
 bash deploy/pi/enable-mint-mode.sh
 ```
+
+## macOS SD recovery (from Mac)
+
+Update the repo, then run the non-interactive wrapper (logs to `/tmp/pi-recover-*.log`):
+
+```bash
+cd ~/Projects/minervamnt && git pull origin main && bash deploy/pi/run-recover-noninteractive.sh
+```
+
+If `git pull` complains about missing upstream tracking, set it once:
+
+```bash
+git fetch origin && git branch --set-upstream-to=origin/main main
+```
+
+Or always use `git pull origin main` (the recovery runner does this automatically).
