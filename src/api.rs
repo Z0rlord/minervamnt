@@ -25,6 +25,11 @@ pub fn router(backend: AppState) -> Router {
         .route("/ark/vtxo/{token_id}", get(token_vtxo))
         .route("/ark/exit", post(ark_exit))
         .route("/ark/refresh/status", get(refresh_status))
+        // Transparency + PoL
+        .route("/transparency/summary", get(transparency_summary))
+        .route("/v1/pol/status", get(pol_status))
+        .route("/v1/pol/roots/{keyset_id}", get(pol_roots))
+        .route("/v1/pol/ots/{epoch_day}", get(pol_ots))
         // Ops
         .route("/health", get(health))
         .with_state(backend)
@@ -85,6 +90,30 @@ async fn ark_exit(
 
 async fn refresh_status(State(b): State<AppState>) -> Result<Json<RefreshStatusResponse>> {
     Ok(Json(b.refresh_status().await?))
+}
+
+async fn transparency_summary(
+    State(b): State<AppState>,
+) -> Result<Json<TransparencySummary>> {
+    Ok(Json(b.transparency_summary().await?))
+}
+
+async fn pol_status(State(b): State<AppState>) -> Result<Json<PolStatusResponse>> {
+    Ok(Json(b.pol_status()?))
+}
+
+async fn pol_roots(
+    State(b): State<AppState>,
+    Path(keyset_id): Path<String>,
+) -> Result<Json<PolRootsResponse>> {
+    Ok(Json(b.pol_roots(&keyset_id)?))
+}
+
+async fn pol_ots(
+    State(b): State<AppState>,
+    Path(epoch_day): Path<String>,
+) -> Result<Json<PolOtsResponse>> {
+    Ok(Json(b.pol_ots_proof(&epoch_day)?))
 }
 
 #[derive(Serialize)]

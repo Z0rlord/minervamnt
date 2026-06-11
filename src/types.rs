@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Active mock keyset id (scaffold). Real deployment uses CDK-managed keysets.
+pub const KEYSET_ID: &str = "00minerva0mock01";
+
 // ---------------------------------------------------------------------------
 // Ark types
 // ---------------------------------------------------------------------------
@@ -27,6 +30,9 @@ pub struct Vtxo {
     pub leaf_tx: String,
     /// The ASP's public key (hex).
     pub asp_pubkey: String,
+    /// Optional V-PACK bundle (hex) for libvpack verification in production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vpack_hex: Option<String>,
 }
 
 /// Lifecycle status of a VTXO in the inventory.
@@ -246,4 +252,81 @@ pub struct RefreshStatusResponse {
     pub next_expiry_height: Option<u64>,
     pub refresh_threshold_blocks: u64,
     pub current_block_height: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Transparency + PoL public responses
+// ---------------------------------------------------------------------------
+
+/// `GET /transparency/summary`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransparencySummary {
+    pub mint_name: String,
+    pub mint_url: String,
+    pub version: String,
+    pub git_commit: Option<String>,
+    pub active_keysets: Vec<String>,
+    pub vtxo_verify_mode: String,
+    pub signatory_policy_enforced: bool,
+    /// PoL cumulative outstanding ecash (sat).
+    pub outstanding_ecash_sat: u64,
+    /// Sum of active VTXO amounts (msat).
+    pub active_vtxo_msat: u64,
+    /// Sum mapped to outstanding tokens (msat).
+    pub allocated_vtxo_msat: u64,
+    /// Unallocated active reserve (msat).
+    pub free_vtxo_msat: u64,
+    pub pol_current_epoch: String,
+    pub pol_last_closed_epoch: Option<String>,
+    pub pol_last_closed_root: Option<String>,
+    pub pol_last_ots_epoch: Option<String>,
+    pub pol_last_ots_stamped_at: Option<u64>,
+    pub ots_enabled: bool,
+    pub refresh_pending: usize,
+    pub next_vtxo_expiry_height: Option<u64>,
+    pub solvency_ok: bool,
+}
+
+/// `GET /v1/pol/status`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolStatusResponse {
+    pub current_epoch_day: String,
+    pub open_mint_total_sat: u64,
+    pub open_burn_total_sat: u64,
+    pub outstanding_sat: u64,
+    pub last_closed_epoch: Option<String>,
+    pub last_closed_root: Option<String>,
+    pub last_ots_stamped_epoch: Option<String>,
+    pub last_ots_stamped_at: Option<u64>,
+    pub ots_enabled: bool,
+}
+
+/// `GET /v1/pol/roots/{keyset_id}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolRootsResponse {
+    pub keyset_id: String,
+    pub roots: Vec<PolEpochRootResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolEpochRootResponse {
+    pub epoch_day: String,
+    pub mint_total_sat: u64,
+    pub burn_total_sat: u64,
+    pub outstanding_sat: u64,
+    pub root_hash: String,
+    pub prev_hash: Option<String>,
+    pub ots_stamped: bool,
+    pub ots_calendar_url: Option<String>,
+    pub ots_stamped_at: Option<u64>,
+}
+
+/// `GET /v1/pol/ots/{epoch_day}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolOtsResponse {
+    pub epoch_day: String,
+    pub root_hash: String,
+    pub proof_hex: String,
+    pub calendar_url: String,
+    pub stamped_at: u64,
 }

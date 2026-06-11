@@ -3,6 +3,7 @@ use axum::http::{Request, StatusCode};
 use minerva_mint::api::router;
 use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::mint_backend::MintBackend;
+use minerva_mint::pol::PolLedger;
 use minerva_mint::vtxo_inventory::VtxoInventory;
 use minerva_mint::AppConfig;
 use std::sync::Arc;
@@ -15,6 +16,8 @@ fn test_backend() -> Arc<MintBackend> {
         config,
         ark,
         VtxoInventory::open_in_memory().unwrap(),
+        PolLedger::open_in_memory().unwrap(),
+        None,
     ))
 }
 

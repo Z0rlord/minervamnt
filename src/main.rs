@@ -7,8 +7,13 @@ use tracing_subscriber::EnvFilter;
 use minerva_mint::api::router;
 use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::mint_backend::MintBackend;
-use minerva_mint::tasks::{run_health_monitor, run_refresh_scheduler};
+use minerva_mint::ots::HttpOtsStamper;
+use minerva_mint::pol::PolLedger;
+use minerva_mint::tasks::{
+    run_health_monitor, run_ots_upgrade_worker, run_pol_epoch_worker, run_refresh_scheduler,
+};
 use minerva_mint::vtxo_inventory::VtxoInventory;
+use minerva_mint::vtxo_verify::VtxoVerifyMode;
 use minerva_mint::AppConfig;
 
 #[tokio::main]
@@ -28,12 +33,33 @@ async fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let inventory = VtxoInventory::open(&config.database.path)?;
+    let verify_mode = VtxoVerifyMode::parse(&config.trust.vtxo_verify_mode)
+        .unwrap_or(VtxoVerifyMode::Scaffold);
+    let inventory = VtxoInventory::open_with_mode(&config.database.path, verify_mode)?;
+    let pol = PolLedger::open(&config.database.path)?;
+
+    let ots: Option<Arc<dyn minerva_mint::ots::OtsStamper>> = if config.trust.ots.enabled {
+        match HttpOtsStamper::new(config.trust.ots.calendar_urls.clone()) {
+            Ok(s) => Some(Arc::new(s)),
+            Err(e) => {
+                tracing::error!(error = %e, "OTS stamper init failed; continuing without OTS");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     tracing::warn!("using MOCK Ark client — no real ASP integration yet");
     let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
 
-    let backend = Arc::new(MintBackend::new(config.clone(), ark, inventory));
+    let backend = Arc::new(MintBackend::new(
+        config.clone(),
+        ark,
+        inventory,
+        pol,
+        ots,
+    ));
 
     tokio::spawn(run_refresh_scheduler(
         backend.clone(),
@@ -43,6 +69,18 @@ async fn main() -> anyhow::Result<()> {
         backend.clone(),
         Duration::from_secs(60),
     ));
+    if config.trust.pol_enabled {
+        tokio::spawn(run_pol_epoch_worker(
+            backend.clone(),
+            Duration::from_secs(300),
+        ));
+    }
+    if config.trust.ots.enabled {
+        tokio::spawn(run_ots_upgrade_worker(
+            backend.clone(),
+            Duration::from_secs(config.trust.ots.upgrade_interval_secs),
+        ));
+    }
 
     let app = router(backend);
     let addr = config.bind_addr();

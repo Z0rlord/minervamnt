@@ -27,3 +27,21 @@ port = 3338
 
 [scheduler]
 refresh_interval_secs = 60
+
+[trust]
+# VTXO verification at boarding: "scaffold" (dev/mock ASP) or "vpack" (production).
+vtxo_verify_mode = "scaffold"
+# Reject blind signing when SignatoryPolicy checks fail.
+signatory_policy_enforced = true
+# Optional per-mint cap (sat); unset = no limit.
+# max_mint_sat = 500000
+# Run daily PoL epoch closure worker.
+pol_enabled = true
+
+[trust.ots]
+enabled = true
+calendar_urls = [
+  "https://a.pool.opentimestamps.org",
+  "https://b.pool.opentimestamps.org",
+]
+upgrade_interval_secs = 3600

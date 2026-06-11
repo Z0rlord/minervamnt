@@ -1,0 +1,2 @@
+# rustfmt defaults; pinned edition so `cargo fmt` is stable across machines.
+edition = "2021"

@@ -1,6 +1,6 @@
 use crate::config::BitcoinConfig;
-use anyhow::{Context, Result};
 use serde::Deserialize;
+use thiserror::Error;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BlockchainInfo {
@@ -11,22 +11,26 @@ pub struct BlockchainInfo {
     pub initialblockdownload: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct RpcResponse {
-    result: Option<BlockchainInfo>,
-    error: Option<serde_json::Value>,
+#[derive(Debug, Error)]
+pub enum BitcoinRpcError {
+    #[error("bitcoin RPC credentials not configured")]
+    MissingCredentials,
+    #[error("bitcoin RPC request failed: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("bitcoin RPC error: {0}")]
+    Rpc(String),
 }
 
-/// Ping Bitcoin Core `getblockchaininfo`. Credentials come from config/env only — never hardcoded.
-pub async fn get_blockchain_info(config: &BitcoinConfig) -> Result<BlockchainInfo> {
+/// Ping Bitcoin Core `getblockchaininfo` using credentials from config/env.
+pub async fn get_blockchain_info(config: &BitcoinConfig) -> Result<BlockchainInfo, BitcoinRpcError> {
     let user = config
         .rpc_user
         .as_deref()
-        .context("BITCOIN_RPC_USER not set")?;
+        .ok_or(BitcoinRpcError::MissingCredentials)?;
     let password = config
         .rpc_password
         .as_deref()
-        .context("BITCOIN_RPC_PASSWORD not set")?;
+        .ok_or(BitcoinRpcError::MissingCredentials)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -34,7 +38,7 @@ pub async fn get_blockchain_info(config: &BitcoinConfig) -> Result<BlockchainInf
 
     let body = serde_json::json!({
         "jsonrpc": "1.0",
-        "id": "minerva-health",
+        "id": "health",
         "method": "getblockchaininfo",
         "params": []
     });
@@ -44,21 +48,25 @@ pub async fn get_blockchain_info(config: &BitcoinConfig) -> Result<BlockchainInf
         .basic_auth(user, Some(password))
         .json(&body)
         .send()
-        .await
-        .with_context(|| format!("bitcoin RPC request to {}", config.rpc_url))?;
+        .await?;
 
-    let rpc: RpcResponse = response
-        .error_for_status()
-        .context("bitcoin RPC HTTP error")?
-        .json()
-        .await
-        .context("parsing bitcoin RPC response")?;
-
-    if let Some(err) = rpc.error {
-        anyhow::bail!("bitcoin RPC error: {err}");
+    let payload: serde_json::Value = response.json().await?;
+    if let Some(err) = payload.get("error").and_then(|e| e.as_object()) {
+        return Err(BitcoinRpcError::Rpc(
+            err.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown RPC error")
+                .to_string(),
+        ));
     }
 
-    rpc.result.context("bitcoin RPC returned no result")
+    serde_json::from_value(
+        payload
+            .get("result")
+            .cloned()
+            .ok_or_else(|| BitcoinRpcError::Rpc("missing result".into()))?,
+    )
+    .map_err(|e| BitcoinRpcError::Rpc(e.to_string()))
 }
 
 #[cfg(test)]
@@ -66,16 +74,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blockchain_info_deserializes() {
-        let json = r#"{
-            "chain": "main",
-            "blocks": 800000,
-            "headers": 800000,
-            "verificationprogress": 0.99,
-            "initialblockdownload": false
-        }"#;
-        let info: BlockchainInfo = serde_json::from_str(json).unwrap();
-        assert_eq!(info.chain, "main");
-        assert!(!info.initialblockdownload);
+    fn missing_credentials_returns_error() {
+        let config = BitcoinConfig {
+            rpc_url: "http://127.0.0.1:8332".into(),
+            rpc_user: None,
+            rpc_password: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(get_blockchain_info(&config)).unwrap_err();
+        assert!(matches!(err, BitcoinRpcError::MissingCredentials));
     }
 }

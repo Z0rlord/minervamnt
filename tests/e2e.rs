@@ -11,9 +11,11 @@ use tower::ServiceExt;
 
 use minerva_mint::api::router;
 use minerva_mint::ark_client::MockArkClient;
-use minerva_mint::AppConfig;
-use minerva_mint::mint_backend::{MintBackend, KEYSET_ID};
+use minerva_mint::mint_backend::MintBackend;
+use minerva_mint::pol::PolLedger;
 use minerva_mint::vtxo_inventory::VtxoInventory;
+use minerva_mint::AppConfig;
+use minerva_mint::KEYSET_ID;
 
 fn test_backend() -> Arc<MintBackend> {
     let config: AppConfig = toml::from_str(include_str!("../config.toml")).expect("config parses");
@@ -22,6 +24,8 @@ fn test_backend() -> Arc<MintBackend> {
         config,
         ark,
         VtxoInventory::open_in_memory().unwrap(),
+        PolLedger::open_in_memory().unwrap(),
+        None,
     ))
 }
 
@@ -202,6 +206,18 @@ async fn full_mint_swap_melt_flow_over_http() {
     assert_eq!(refresh["refresh_threshold_blocks"], 144);
     assert!(refresh["current_block_height"].as_u64().unwrap() > 0);
     assert!(refresh.get("pending_refreshes").is_some());
+
+    // 7. Transparency summary reflects issuance + backing (64 sat left after melt).
+    let (status, summary) = request(&app, "GET", "/transparency/summary", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(summary["outstanding_ecash_sat"], 64);
+    assert!(summary["active_vtxo_msat"].as_u64().unwrap() > 0);
+    assert_eq!(summary["solvency_ok"], true);
+    assert_eq!(summary["signatory_policy_enforced"], true);
+
+    let (status, pol) = request(&app, "GET", "/v1/pol/status", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pol["outstanding_sat"].as_u64().unwrap(), 64);
 }
 
 #[tokio::test]
