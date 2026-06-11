@@ -2,7 +2,7 @@
 
 Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead of Lightning liquidity. Public URL: [https://minervamnt.xyz](https://minervamnt.xyz).
 
-> **Current mode: landing page.** The mint API is temporarily disabled. `minervamnt.xyz` serves a static “coming soon” page. See [Landing page mode](#landing-page-mode) to switch modes.
+> **Current mode: landing page (Cloudflare Pages).** The mint API and Pi tunnel are disabled. `minervamnt.xyz` is served as static HTML from Cloudflare Pages — independent of the Pi. See [Landing page (Cloudflare Pages)](#landing-page-cloudflare-pages).
 
 ## Architecture
 
@@ -112,35 +112,36 @@ When `.env` has RPC credentials, `GET /health` includes a `bitcoin` object with 
 
 See [`deploy/pi/README.md`](deploy/pi/README.md) for the full Pi reference.
 
-### Cloudflare Tunnel → minervamnt.xyz
+### Landing page (Cloudflare Pages)
 
-`cloudflared` is installed on pi5. Finish tunnel setup (one-time Cloudflare login required):
+`minervamnt.xyz` is deployed to **Cloudflare Pages** from the `landing/` directory. No Pi or tunnel is required for the public site.
 
-1. **Login:** `cloudflared tunnel login` (opens browser for your Cloudflare account)
-2. **Create tunnel:** `cloudflared tunnel create minervamnt`
-3. **DNS route:** `cloudflared tunnel route dns minervamnt minervamnt.xyz`
-4. **Config:** copy [`deploy/cloudflared/config.yml.example`](deploy/cloudflared/config.yml.example) to `~/.cloudflared/config.yml` and replace `<TUNNEL_UUID>`
-5. **systemd:** copy [`deploy/systemd/cloudflared.service.example`](deploy/systemd/cloudflared.service.example) to `/etc/systemd/system/cloudflared.service`, then `sudo systemctl enable --now cloudflared`
-
-Ingress (mint mode): `https://minervamnt.xyz` → `http://localhost:3338`.
-
-Ingress (landing mode): `https://minervamnt.xyz` → `http://localhost:8080`.
-
-### Landing page mode
-
-When the mint API should be offline, use the static landing page instead:
+| Item | Value |
+|------|-------|
+| Pages project | `minervamnt` |
+| Deploy | [`deploy/cloudflare-pages/README.md`](deploy/cloudflare-pages/README.md) |
+| DNS | `minervamnt.xyz` / `www` → CNAME `minervamnt.pages.dev` |
 
 ```bash
-# On pi5 (after git pull)
-bash deploy/pi/enable-landing-mode.sh
+# Manual deploy from Mac (Doppler injects CLOUDFLARE_API_TOKEN)
+doppler run --project dojopop --config prd_zorie -- bash -c '
+  export CLOUDFLARE_ACCOUNT_ID=dfc6e38d5b254f0f8ffac8a0e554112a
+  npx wrangler@4 pages deploy landing --project-name=minervamnt --branch=main
+'
 ```
 
-This stops `minerva-mint`, starts `minervamnt-landing` (Python `http.server` on `127.0.0.1:8080`), and points cloudflared at port 8080.
+Pushes to `main` that touch `landing/**` also deploy via GitHub Actions (requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repo secrets).
 
-To restore the mint API:
+### Cloudflare Tunnel (Pi — disabled for apex)
+
+`cloudflared` remains installed on pi5 but **DNS no longer points at the tunnel**. Apex traffic goes to Pages. The tunnel can stay stopped; the site works even when Pi SSH is down.
+
+To restore the mint API later, use a subdomain (e.g. `api.minervamnt.xyz` → tunnel → `:3338`) or switch DNS back to the tunnel. Pi-side helpers are still in [`deploy/pi/`](deploy/pi/):
 
 ```bash
-bash deploy/pi/enable-mint-mode.sh
+# On pi5 — only when serving mint/landing via tunnel again
+bash deploy/pi/enable-mint-mode.sh      # mint API on :3338
+bash deploy/pi/enable-landing-mode.sh   # static landing on :8080 via tunnel
 ```
 
 ### Minerva Mint systemd
