@@ -2,6 +2,8 @@
 
 Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead of Lightning liquidity. Public URL: [https://minervamnt.xyz](https://minervamnt.xyz).
 
+> **Canonical repo.** This directory (`~/Projects/minervamnt`) is the GitHub source of truth ([Z0rlord/minervamnt](https://github.com/Z0rlord/minervamnt)). A parallel scaffold at `~/Projects/minerva-mint` was created during early bootstrapping and is **deprecated/spare** — do not develop there; merge any stray changes into this repo instead.
+
 > **Current mode: landing page (Cloudflare Pages).** The mint API and Pi tunnel are disabled. `minervamnt.xyz` is served as static HTML from Cloudflare Pages — independent of the Pi. See [Landing page (Cloudflare Pages)](#landing-page-cloudflare-pages).
 
 ## Architecture

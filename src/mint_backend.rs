@@ -15,6 +15,9 @@
 use crate::ark_client::ArkClient;
 use crate::config::AppConfig;
 use crate::error::{MintError, Result};
+use crate::ots::{digest_from_root_hex, OtsStamper};
+use crate::pol::PolLedger;
+use crate::signatory::{DefaultSignatoryPolicy, MintSignRequest, SignatoryPolicy, SwapSignRequest};
 use crate::types::*;
 use crate::vtxo_inventory::VtxoInventory;
 use sha2::{Digest, Sha256};
@@ -25,8 +28,8 @@ use uuid::Uuid;
 const QUOTE_TTL_SECS: u64 = 600;
 const MSAT_PER_SAT: u64 = 1000;
 
-/// Keyset id for the scaffold's single mock keyset.
-pub const KEYSET_ID: &str = "00minerva0mock01";
+/// Re-export for tests and external callers.
+pub use crate::types::KEYSET_ID;
 
 #[derive(Debug, Clone)]
 struct MintQuote {
@@ -47,6 +50,10 @@ pub struct MintBackend {
     config: AppConfig,
     ark: Arc<dyn ArkClient>,
     inventory: VtxoInventory,
+    pol: PolLedger,
+    ots: Option<Arc<dyn OtsStamper>>,
+    policy: DefaultSignatoryPolicy,
+    policy_enforced: bool,
     mint_quotes: Mutex<HashMap<String, MintQuote>>,
     melt_quotes: Mutex<HashMap<String, MeltQuote>>,
     /// Spent proof secrets (double-spend guard). In-memory for the scaffold;
@@ -55,8 +62,19 @@ pub struct MintBackend {
 }
 
 impl MintBackend {
-    pub fn new(config: AppConfig, ark: Arc<dyn ArkClient>, inventory: VtxoInventory) -> Self {
+    pub fn new(
+        config: AppConfig,
+        ark: Arc<dyn ArkClient>,
+        inventory: VtxoInventory,
+        pol: PolLedger,
+        ots: Option<Arc<dyn OtsStamper>>,
+    ) -> Self {
+        let policy = DefaultSignatoryPolicy::new(config.trust.max_mint_sat);
         MintBackend {
+            policy_enforced: config.trust.signatory_policy_enforced,
+            policy,
+            pol,
+            ots,
             config,
             ark,
             inventory,
@@ -76,6 +94,10 @@ impl MintBackend {
 
     pub fn inventory(&self) -> &VtxoInventory {
         &self.inventory
+    }
+
+    pub fn pol(&self) -> &PolLedger {
+        &self.pol
     }
 
     fn now() -> u64 {
@@ -120,8 +142,7 @@ impl MintBackend {
         Ok(outputs.iter().map(|o| o.amount).sum())
     }
 
-    /// Verify proofs: keyset, mock signature validity, and double-spend.
-    /// Marks secrets spent on success.
+    /// Verify proofs and mark secrets spent. Does not update PoL (swap is net-zero).
     fn verify_and_spend_inputs(&self, inputs: &[Proof]) -> Result<u64> {
         if inputs.is_empty() {
             return Err(MintError::InvalidRequest("no inputs provided".into()));
@@ -138,10 +159,18 @@ impl MintBackend {
                 return Err(MintError::TokenAlreadySpent);
             }
         }
+        let total: u64 = inputs.iter().map(|p| p.amount).sum();
         for p in inputs {
             spent.insert(p.secret.clone());
         }
-        Ok(inputs.iter().map(|p| p.amount).sum())
+        Ok(total)
+    }
+
+    fn record_melt_burns(&self, inputs: &[Proof]) -> Result<()> {
+        for p in inputs {
+            self.pol.record_burn(&p.secret, p.amount)?;
+        }
+        Ok(())
     }
 
     // -- NUT-06 ------------------------------------------------------------
@@ -240,7 +269,42 @@ impl MintBackend {
         self.inventory
             .allocate_vtxo_for_tokens(&req.quote, amount_msat)?;
 
+        let mapping = self
+            .inventory
+            .get_mapping(&req.quote)?
+            .ok_or_else(|| MintError::MappingNotFound(req.quote.clone()))?;
+
+        if self.policy_enforced {
+            let quote_state = self
+                .mint_quotes
+                .lock()
+                .unwrap()
+                .get(&req.quote)
+                .map(|q| q.state)
+                .unwrap_or(QuoteState::Unpaid);
+            let quote_expiry = self
+                .mint_quotes
+                .lock()
+                .unwrap()
+                .get(&req.quote)
+                .map(|q| q.expiry)
+                .unwrap_or(0);
+            self.policy.can_sign_mint(&MintSignRequest {
+                quote_id: &req.quote,
+                amount_sat,
+                outputs: &req.outputs,
+                quote_state,
+                quote_expiry,
+                now: Self::now(),
+                vtxo_id: Some(&mapping.vtxo_id),
+            })?;
+        }
+
         let signatures = req.outputs.iter().map(Self::mock_blind_sign).collect();
+
+        let b_points: Vec<String> = req.outputs.iter().map(|o| o.b.clone()).collect();
+        self.pol
+            .record_mint(&req.quote, amount_sat, &b_points)?;
 
         self.mint_quotes
             .lock()
@@ -344,6 +408,7 @@ impl MintBackend {
                 outputs: amount_sat + fee_reserve_sat,
             });
         }
+        self.record_melt_burns(&req.inputs)?;
 
         // Payout via the ASP. In the scaffold this is a no-op "preimage";
         // real impl: Ark offboarding tx or LN payment through the ASP.
@@ -392,6 +457,12 @@ impl MintBackend {
                 inputs: input_total,
                 outputs: output_total,
             });
+        }
+        if self.policy_enforced {
+            self.policy.can_sign_swap(&SwapSignRequest {
+                input_total_sat: input_total,
+                outputs: &req.outputs,
+            })?;
         }
         self.verify_and_spend_inputs(&req.inputs)?;
         let signatures = req.outputs.iter().map(Self::mock_blind_sign).collect();
@@ -449,6 +520,137 @@ impl MintBackend {
             current_block_height: height,
         })
     }
+
+    // -- Transparency + PoL ---------------------------------------------------
+
+    pub async fn transparency_summary(&self) -> Result<TransparencySummary> {
+        let pol = self.pol.status()?;
+        let height = self.ark.current_block_height().await?;
+        let threshold = self.config.ark.refresh_threshold_blocks;
+        let refresh_pending = self.inventory.get_refresh_queue(height, threshold)?.len();
+        let active_vtxo_msat = self.inventory.total_active_vtxo_msat()?;
+        let allocated_vtxo_msat = self.inventory.total_allocated_msat()?;
+        let free_vtxo_msat = self.inventory.free_reserve_msat()?;
+        let outstanding_msat = pol.outstanding_sat * MSAT_PER_SAT;
+        let solvency_ok = allocated_vtxo_msat >= outstanding_msat;
+
+        Ok(TransparencySummary {
+            mint_name: self.config.mint.name.clone(),
+            mint_url: self.config.mint.url.clone(),
+            version: format!("minerva-mint/{}", env!("CARGO_PKG_VERSION")),
+            git_commit: option_env!("MINERVA_GIT_COMMIT").map(str::to_string),
+            active_keysets: vec![KEYSET_ID.to_string()],
+            vtxo_verify_mode: self.config.trust.vtxo_verify_mode.clone(),
+            signatory_policy_enforced: self.policy_enforced,
+            outstanding_ecash_sat: pol.outstanding_sat,
+            active_vtxo_msat,
+            allocated_vtxo_msat,
+            free_vtxo_msat,
+            pol_current_epoch: pol.current_epoch_day,
+            pol_last_closed_epoch: pol.last_closed_epoch,
+            pol_last_closed_root: pol.last_closed_root,
+            pol_last_ots_epoch: pol.last_ots_stamped_epoch,
+            pol_last_ots_stamped_at: pol.last_ots_stamped_at,
+            ots_enabled: self.config.trust.ots.enabled,
+            refresh_pending,
+            next_vtxo_expiry_height: self.inventory.next_expiry_height()?,
+            solvency_ok,
+        })
+    }
+
+    pub fn pol_status(&self) -> Result<PolStatusResponse> {
+        let s = self.pol.status()?;
+        Ok(PolStatusResponse {
+            current_epoch_day: s.current_epoch_day,
+            open_mint_total_sat: s.open_mint_total_sat,
+            open_burn_total_sat: s.open_burn_total_sat,
+            outstanding_sat: s.outstanding_sat,
+            last_closed_epoch: s.last_closed_epoch,
+            last_closed_root: s.last_closed_root,
+            last_ots_stamped_epoch: s.last_ots_stamped_epoch,
+            last_ots_stamped_at: s.last_ots_stamped_at,
+            ots_enabled: self.config.trust.ots.enabled,
+        })
+    }
+
+    pub async fn stamp_epoch_ots(&self, epoch_day: &str) -> Result<()> {
+        if !self.config.trust.ots.enabled {
+            return Ok(());
+        }
+        let Some(ots) = &self.ots else {
+            tracing::warn!("OTS enabled but no stamper configured");
+            return Ok(());
+        };
+        if self.pol.has_ots_stamp(epoch_day)? {
+            return Ok(());
+        }
+        let Some(root) = self.pol.epoch_root_hash(epoch_day)? else {
+            return Ok(());
+        };
+        let digest = digest_from_root_hex(&root)?;
+        let stamp = ots.stamp_digest(digest).await?;
+        self.pol.save_ots_stamp(epoch_day, &stamp.proof_hex, &stamp.calendar_url)?;
+        tracing::info!(epoch = %epoch_day, calendar = %stamp.calendar_url, "PoL epoch stamped with OpenTimestamps");
+        Ok(())
+    }
+
+    pub async fn stamp_pending_ots_epochs(&self) -> Result<usize> {
+        let pending = self.pol.epochs_pending_ots()?;
+        let mut done = 0;
+        for day in pending {
+            if self.stamp_epoch_ots(&day).await.is_ok() {
+                done += 1;
+            }
+        }
+        Ok(done)
+    }
+
+    pub fn pol_ots_proof(&self, epoch_day: &str) -> Result<PolOtsResponse> {
+        let root = self
+            .pol
+            .epoch_root_hash(epoch_day)?
+            .ok_or_else(|| MintError::InvalidRequest(format!("unknown epoch {epoch_day}")))?;
+        let (proof_hex, calendar_url) = self
+            .pol
+            .ots_proof(epoch_day)?
+            .ok_or_else(|| MintError::InvalidRequest(format!("no OTS proof for {epoch_day}")))?;
+        let roots = self.pol.roots_for_keyset(KEYSET_ID)?;
+        let stamped_at = roots
+            .iter()
+            .find(|r| r.epoch_day == epoch_day)
+            .and_then(|r| r.ots_stamped_at)
+            .unwrap_or(0);
+        Ok(PolOtsResponse {
+            epoch_day: epoch_day.to_string(),
+            root_hash: root,
+            proof_hex,
+            calendar_url,
+            stamped_at,
+        })
+    }
+
+    pub fn pol_roots(&self, keyset_id: &str) -> Result<PolRootsResponse> {
+        let roots = self
+            .pol
+            .roots_for_keyset(keyset_id)?
+            .into_iter()
+            .map(|r| PolEpochRootResponse {
+                epoch_day: r.epoch_day,
+                mint_total_sat: r.mint_total_sat,
+                burn_total_sat: r.burn_total_sat,
+                outstanding_sat: r.outstanding_sat,
+                root_hash: r.root_hash,
+                prev_hash: r.prev_hash,
+                ots_stamped: r.ots_proof_hex.is_some(),
+                ots_calendar_url: r.ots_calendar_url,
+                ots_stamped_at: r.ots_stamped_at,
+            })
+            .collect();
+        Ok(PolRootsResponse {
+            keyset_id: keyset_id.to_string(),
+            roots,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -465,7 +667,8 @@ mod tests {
         let config = test_config();
         let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
         let inventory = VtxoInventory::open_in_memory().unwrap();
-        MintBackend::new(config, ark, inventory)
+        let pol = PolLedger::open_in_memory().unwrap();
+        MintBackend::new(config, ark, inventory, pol, None)
     }
 
     /// Decompose `amount` into powers of two per NUT-00. `tag` keeps blinded
@@ -658,5 +861,49 @@ mod tests {
         // Mapping is gone afterwards.
         let err = b.token_vtxo(&quote.quote).await.unwrap_err();
         assert!(matches!(err, MintError::MappingNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn transparency_reports_solvency() {
+        let b = backend();
+        let quote = b
+            .mint_quote(MintQuoteBolt11Request {
+                amount: 128,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        b.mint(MintBolt11Request {
+            quote: quote.quote.clone(),
+            outputs: outputs_for(128, "tr"),
+        })
+        .await
+        .unwrap();
+
+        let summary = b.transparency_summary().await.unwrap();
+        assert_eq!(summary.outstanding_ecash_sat, 128);
+        assert!(summary.allocated_vtxo_msat >= 128_000);
+        assert!(summary.solvency_ok);
+        assert_eq!(summary.vtxo_verify_mode, "scaffold");
+    }
+
+    #[tokio::test]
+    async fn stamp_epoch_ots_with_mock() {
+        let config = test_config();
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let inventory = VtxoInventory::open_in_memory().unwrap();
+        let pol = PolLedger::open_in_memory().unwrap();
+        let b = MintBackend::new(
+            config,
+            ark,
+            inventory,
+            pol,
+            Some(Arc::new(crate::ots::MockOtsStamper)),
+        );
+        let day = PolLedger::current_epoch_day();
+        b.pol().record_mint("q1", 8, &["02b".into()]).unwrap();
+        b.pol().close_epoch(&day).unwrap();
+        b.stamp_epoch_ots(&day).await.unwrap();
+        assert!(b.pol().has_ots_stamp(&day).unwrap());
     }
 }

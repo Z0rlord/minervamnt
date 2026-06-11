@@ -1,6 +1,7 @@
-//! Background tasks: VTXO refresh scheduler and health monitor.
+//! Background tasks: VTXO refresh scheduler, health monitor, PoL epoch closure.
 
 use crate::mint_backend::MintBackend;
+use crate::pol::PolLedger;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -80,18 +81,61 @@ pub async fn run_health_monitor(backend: Arc<MintBackend>, interval: Duration) {
     }
 }
 
+/// Close the previous UTC epoch day on a fixed interval.
+///
+/// In production this runs shortly after midnight UTC; the scaffold uses a
+/// configurable interval and closes the prior day bucket when the day changes.
+pub async fn run_pol_epoch_worker(backend: Arc<MintBackend>, interval: Duration) {
+    let mut last_day = PolLedger::current_epoch_day();
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let day = PolLedger::current_epoch_day();
+        if day != last_day {
+            match backend.pol().close_epoch(&last_day) {
+                Ok(Some(_)) => {
+                    tracing::info!(epoch = %last_day, "PoL epoch closed");
+                    if let Err(e) = backend.stamp_epoch_ots(&last_day).await {
+                        tracing::error!(epoch = %last_day, error = %e, "PoL OTS stamp failed");
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => tracing::error!(epoch = %last_day, error = %e, "PoL epoch close failed"),
+            }
+            last_day = day;
+        }
+    }
+}
+
+/// Retry OpenTimestamps stamping for any closed epochs missing proofs.
+pub async fn run_ots_upgrade_worker(backend: Arc<MintBackend>, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        match backend.stamp_pending_ots_epochs().await {
+            Ok(n) if n > 0 => tracing::info!(count = n, "stamped pending PoL epochs with OTS"),
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "OTS upgrade pass failed"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ark_client::{ArkClient, MockArkClient};
     use crate::config::AppConfig;
+    use crate::pol::PolLedger;
     use crate::vtxo_inventory::VtxoInventory;
 
     fn backend_with_ark(ark: Arc<MockArkClient>) -> MintBackend {
         let raw = include_str!("../config.toml");
         let config: AppConfig = toml::from_str(raw).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
-        MintBackend::new(config, ark, inventory)
+        let pol = PolLedger::open_in_memory().unwrap();
+        MintBackend::new(config, ark, inventory, pol, None)
     }
 
     #[tokio::test]

@@ -85,6 +85,7 @@ impl MockArkClient {
             branch_tx: self.deterministic_hex("branch", n),
             leaf_tx: self.deterministic_hex("leaf", n),
             asp_pubkey: self.asp_pubkey.clone(),
+            vpack_hex: None,
         }
     }
 }

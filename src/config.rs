@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub liquidity: LiquidityConfig,
     pub database: DatabaseConfig,
     #[serde(default)]
+    pub trust: TrustConfig,
+    #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
@@ -59,6 +61,69 @@ pub struct LiquidityConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrustConfig {
+    pub vtxo_verify_mode: String,
+    #[serde(default = "default_true")]
+    pub signatory_policy_enforced: bool,
+    pub max_mint_sat: Option<u64>,
+    #[serde(default = "default_true")]
+    pub pol_enabled: bool,
+    #[serde(default)]
+    pub ots: OtsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OtsConfig {
+    #[serde(default = "default_ots_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_ots_calendars")]
+    pub calendar_urls: Vec<String>,
+    #[serde(default = "default_ots_upgrade_interval")]
+    pub upgrade_interval_secs: u64,
+}
+
+fn default_ots_enabled() -> bool {
+    true
+}
+
+fn default_ots_upgrade_interval() -> u64 {
+    3600
+}
+
+fn default_ots_calendars() -> Vec<String> {
+    vec![
+        "https://a.pool.opentimestamps.org".into(),
+        "https://b.pool.opentimestamps.org".into(),
+    ]
+}
+
+impl Default for OtsConfig {
+    fn default() -> Self {
+        OtsConfig {
+            enabled: default_ots_enabled(),
+            calendar_urls: default_ots_calendars(),
+            upgrade_interval_secs: default_ots_upgrade_interval(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        TrustConfig {
+            vtxo_verify_mode: "scaffold".to_string(),
+            signatory_policy_enforced: true,
+            max_mint_sat: None,
+            pol_enabled: true,
+            ots: OtsConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +184,21 @@ impl AppConfig {
         if let Ok(v) = std::env::var("DATABASE_PATH") {
             self.database.path = v;
         }
+        if let Ok(v) = std::env::var("MINERVA_VTXO_VERIFY_MODE") {
+            self.trust.vtxo_verify_mode = v;
+        }
+        if let Ok(v) = std::env::var("MINERVA_SIGNATORY_POLICY_ENFORCED") {
+            self.trust.signatory_policy_enforced = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("MINERVA_MAX_MINT_SAT") {
+            self.trust.max_mint_sat = Some(v.parse().unwrap_or(0));
+        }
+        if let Ok(v) = std::env::var("MINERVA_POL_ENABLED") {
+            self.trust.pol_enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("MINERVA_OTS_ENABLED") {
+            self.trust.ots.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
         if let Ok(v) = std::env::var("BIND_ADDR") {
             if let Some((host, port)) = v.rsplit_once(':') {
                 if let Ok(port) = port.parse() {
@@ -149,6 +229,8 @@ mod tests {
         assert_eq!(cfg.ark.default_vtxo_expiry, 25920);
         assert!(cfg.liquidity.min_vtxo_reserve_msat > 0);
         assert_eq!(cfg.bitcoin.rpc_url, "http://100.75.188.125:8332");
+        assert_eq!(cfg.trust.vtxo_verify_mode, "scaffold");
+        assert!(cfg.trust.signatory_policy_enforced);
     }
 
     #[test]

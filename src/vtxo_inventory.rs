@@ -9,6 +9,7 @@
 
 use crate::error::{MintError, Result};
 use crate::types::{Vtxo, VtxoStatus};
+use crate::vtxo_verify::{verify_vtxo, VtxoVerifyMode};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -22,7 +23,8 @@ CREATE TABLE IF NOT EXISTS vtxo_inventory (
     expires_at    INTEGER NOT NULL,
     branch_tx_hex TEXT NOT NULL,
     leaf_tx_hex   TEXT NOT NULL,
-    asp_pubkey    TEXT NOT NULL DEFAULT ''
+    asp_pubkey    TEXT NOT NULL DEFAULT '',
+    vpack_hex     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS token_vtxo_map (
@@ -59,22 +61,36 @@ pub struct TokenMapping {
 #[derive(Clone)]
 pub struct VtxoInventory {
     conn: Arc<Mutex<Connection>>,
+    verify_mode: VtxoVerifyMode,
 }
 
 impl VtxoInventory {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_connection(Connection::open(path)?)
+        Self::open_with_mode(path, VtxoVerifyMode::default())
+    }
+
+    pub fn open_with_mode(path: impl AsRef<Path>, verify_mode: VtxoVerifyMode) -> Result<Self> {
+        Self::from_connection(Connection::open(path)?, verify_mode)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::open_in_memory_with_mode(VtxoVerifyMode::default())
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    pub fn open_in_memory_with_mode(verify_mode: VtxoVerifyMode) -> Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?, verify_mode)
+    }
+
+    fn from_connection(conn: Connection, verify_mode: VtxoVerifyMode) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
         Ok(VtxoInventory {
             conn: Arc::new(Mutex::new(conn)),
+            verify_mode,
         })
+    }
+
+    pub fn verify_mode(&self) -> VtxoVerifyMode {
+        self.verify_mode
     }
 
     fn now() -> u64 {
@@ -86,11 +102,12 @@ impl VtxoInventory {
 
     /// Register a freshly boarded VTXO as active inventory.
     pub fn insert_vtxo(&self, vtxo: &Vtxo) -> Result<()> {
+        verify_vtxo(vtxo, self.verify_mode)?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO vtxo_inventory
-               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey)
-             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7)",
+               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey, vpack_hex)
+             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 vtxo.id,
                 vtxo.amount_msat as i64,
@@ -99,6 +116,7 @@ impl VtxoInventory {
                 vtxo.branch_tx,
                 vtxo.leaf_tx,
                 vtxo.asp_pubkey,
+                vtxo.vpack_hex,
             ],
         )?;
         Ok(())
@@ -108,7 +126,7 @@ impl VtxoInventory {
         let conn = self.conn.lock().unwrap();
         let rec = conn
             .query_row(
-                "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey
+                "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey, vpack_hex
                  FROM vtxo_inventory WHERE id = ?1",
                 params![vtxo_id],
                 Self::row_to_record,
@@ -127,6 +145,7 @@ impl VtxoInventory {
                 branch_tx: row.get(5)?,
                 leaf_tx: row.get(6)?,
                 asp_pubkey: row.get(7)?,
+                vpack_hex: row.get(8)?,
             },
             status: VtxoStatus::parse(&status_str).unwrap_or(VtxoStatus::Spent),
             created_at: row.get::<_, i64>(3)? as u64,
@@ -149,6 +168,7 @@ impl VtxoInventory {
     /// row is marked spent, the new one inserted active, and all token
     /// mappings are repointed.
     pub fn replace_refreshed(&self, old_id: &str, fresh: &Vtxo) -> Result<()> {
+        verify_vtxo(fresh, self.verify_mode)?;
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
@@ -157,8 +177,8 @@ impl VtxoInventory {
         )?;
         tx.execute(
             "INSERT INTO vtxo_inventory
-               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey)
-             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7)",
+               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey, vpack_hex)
+             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 fresh.id,
                 fresh.amount_msat as i64,
@@ -167,6 +187,7 @@ impl VtxoInventory {
                 fresh.branch_tx,
                 fresh.leaf_tx,
                 fresh.asp_pubkey,
+                fresh.vpack_hex,
             ],
         )?;
         tx.execute(
@@ -276,7 +297,7 @@ impl VtxoInventory {
         let conn = self.conn.lock().unwrap();
         let cutoff = current_height + threshold_blocks;
         let mut stmt = conn.prepare(
-            "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey
+            "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey, vpack_hex
              FROM vtxo_inventory
              WHERE status = 'active' AND expires_at <= ?1
              ORDER BY expires_at ASC",
@@ -313,6 +334,30 @@ impl VtxoInventory {
         )?;
         Ok(h.map(|v| v as u64))
     }
+
+    /// Total msat in active VTXOs (gross, before allocation).
+    pub fn total_active_vtxo_msat(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_msat), 0) FROM vtxo_inventory WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(total.max(0) as u64)
+    }
+
+    /// Total msat mapped to outstanding token batches on active VTXOs.
+    pub fn total_allocated_msat(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(m.amount_msat), 0) FROM token_vtxo_map m
+             JOIN vtxo_inventory v ON v.id = m.vtxo_id
+             WHERE v.status = 'active'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(total.max(0) as u64)
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +372,7 @@ mod tests {
             branch_tx: format!("{id}-branch"),
             leaf_tx: format!("{id}-leaf"),
             asp_pubkey: "02ab".to_string(),
+            vpack_hex: None,
         }
     }
 
