@@ -4,161 +4,45 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Minerva Mint</title>
-  <meta name="description" content="Minerva Mint — Ark-backed Cashu ecash. Coming soon.">
-  <style>
-    :root {
-      --bg: #0a0a0b;
-      --surface: #111113;
-      --border: #1e1e22;
-      --text: #e8e6e3;
-      --muted: #8a8680;
-      --accent: #f7931a;
-      --accent-dim: rgba(247, 147, 26, 0.12);
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    html, body {
-      height: 100%;
-    }
-
-    body {
-      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    .bg-grid {
-      position: fixed;
-      inset: 0;
-      background-image:
-        linear-gradient(var(--border) 1px, transparent 1px),
-        linear-gradient(90deg, var(--border) 1px, transparent 1px);
-      background-size: 48px 48px;
-      opacity: 0.35;
-      mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black 20%, transparent 75%);
-      pointer-events: none;
-    }
-
-    .glow {
-      position: fixed;
-      top: -20%;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 600px;
-      height: 600px;
-      background: radial-gradient(circle, var(--accent-dim) 0%, transparent 70%);
-      pointer-events: none;
-    }
-
-    main {
-      position: relative;
-      min-height: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 2rem 1.5rem;
-      text-align: center;
-    }
-
-    .logo {
-      width: 56px;
-      height: 56px;
-      margin-bottom: 1.5rem;
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      background: var(--surface);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 0 0 1px rgba(247, 147, 26, 0.08), 0 8px 32px rgba(0, 0, 0, 0.4);
-    }
-
-    .logo svg {
-      width: 28px;
-      height: 28px;
-    }
-
-    h1 {
-      font-size: clamp(1.75rem, 5vw, 2.5rem);
-      font-weight: 600;
-      letter-spacing: -0.03em;
-      margin-bottom: 0.5rem;
-    }
-
-    .tagline {
-      font-size: 0.95rem;
-      color: var(--muted);
-      margin-bottom: 2rem;
-      max-width: 28rem;
-    }
-
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 1rem;
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      background: var(--surface);
-      font-size: 0.8125rem;
-      color: var(--muted);
-      margin-bottom: 2.5rem;
-    }
-
-    .status-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: 0 0 8px var(--accent);
-      animation: pulse 2.5s ease-in-out infinite;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
-    }
-
-    .card {
-      max-width: 26rem;
-      padding: 1.5rem;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: var(--surface);
-      text-align: left;
-    }
-
-    .card p {
-      font-size: 0.9rem;
-      color: var(--muted);
-    }
-
-    .card p + p {
-      margin-top: 0.75rem;
-    }
-
-    footer {
-      position: relative;
-      margin-top: 3rem;
-      font-size: 0.75rem;
-      color: var(--muted);
-      opacity: 0.7;
-    }
-  </style>
+  <meta name="description" content="Minerva Mint — Ark-backed Cashu ecash. Open-source freedom-tech infrastructure.">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/tos.js" defer></script>
 </head>
-<body>
+<body class="tos-locked">
   <div class="bg-grid" aria-hidden="true"></div>
   <div class="glow" aria-hidden="true"></div>
 
-  <main>
+  <!-- Terms gate: must accept before viewing site -->
+  <div id="tos-gate" class="tos-gate" role="dialog" aria-modal="true" aria-labelledby="tos-title">
+    <div class="tos-panel">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" stroke="#f7931a" stroke-width="1.5" stroke-linejoin="round"/>
+          <path d="M12 8v8M9 11h6" stroke="#f7931a" stroke-width="1.5" stroke-linecap="round"/>
+        </svg>
+      </div>
+
+      <h2 id="tos-title">Welcome to Minerva Mint</h2>
+      <p class="intro">
+        minervamnt.xyz provides information about an open-source, experimental
+        Ark-backed Cashu mint. Ecash involves custodial and regulatory risks.
+        By continuing, you confirm you have read and agree to our Terms of Service.
+      </p>
+
+      <label class="tos-check" for="tos-agree">
+        <input type="checkbox" id="tos-agree" name="tos-agree">
+        <span>I agree to the <a href="/terms.html" target="_blank" rel="noopener noreferrer">Terms of Service</a></span>
+      </label>
+
+      <div class="tos-actions">
+        <button type="button" class="btn btn-primary" id="tos-continue" disabled>Continue</button>
+        <button type="button" class="btn btn-ghost" id="tos-decline">Decline</button>
+      </div>
+      <p class="tos-decline-msg" id="tos-decline-msg" aria-live="polite"></p>
+    </div>
+  </div>
+
+  <main id="site-content" class="home-main" hidden>
     <div class="logo" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" stroke="#f7931a" stroke-width="1.5" stroke-linejoin="round"/>
@@ -167,7 +51,7 @@
     </div>
 
     <h1>Minerva Mint</h1>
-    <p class="tagline">Ark-backed Cashu ecash — private, bearer tokens settled on Bitcoin.</p>
+    <p class="tagline">Ark-backed Cashu ecash — private bearer tokens settled on Bitcoin.</p>
 
     <div class="status">
       <span class="status-dot" aria-hidden="true"></span>
@@ -176,10 +60,14 @@
 
     <div class="card">
       <p>The mint is under active development and is not accepting connections at this time.</p>
-      <p>Check back soon — we're building something worth the wait.</p>
+      <p>Check back soon — we're building open-source freedom-tech infrastructure worth the wait.</p>
     </div>
 
-    <footer>minervamnt.xyz</footer>
+    <footer class="site-footer">
+      <span>minervamnt.xyz</span>
+      <a href="/terms.html">Terms of Service</a>
+      <a href="https://github.com/Z0rlord/minervamnt" rel="noopener noreferrer">GitHub</a>
+    </footer>
   </main>
 </body>
 </html>
