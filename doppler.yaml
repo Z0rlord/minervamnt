@@ -1,0 +1,3 @@
+setup:
+  project: minervamnt
+  config: dev
