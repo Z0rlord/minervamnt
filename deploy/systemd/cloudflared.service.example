@@ -1,18 +1,16 @@
 [Unit]
-Description=Cloudflare Tunnel for minervamnt.xyz
-After=network-online.target minerva-mint.service
+Description=Cloudflare Tunnel (Minerva Mint API)
+Documentation=https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-User=cloudflared
-Group=cloudflared
-ExecStart=/usr/local/bin/cloudflared --config /etc/cloudflared/config.yml tunnel run
+User=<USER>
+Group=<USER>
+ExecStart=/usr/local/bin/cloudflared tunnel --config /home/<USER>/.cloudflared/config.yml run
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=cloudflared
 
 [Install]
 WantedBy=multi-user.target

@@ -17,8 +17,10 @@ pub fn router(backend: AppState) -> Router {
         // Cashu NUT endpoints
         .route("/v1/info", get(info))
         .route("/v1/mint/quote/bolt11", post(mint_quote))
+        .route("/v1/mint/quote/bolt11/{quote_id}", get(get_mint_quote))
         .route("/v1/mint/bolt11", post(mint))
         .route("/v1/melt/quote/bolt11", post(melt_quote))
+        .route("/v1/melt/quote/bolt11/{quote_id}", get(get_melt_quote))
         .route("/v1/melt/bolt11", post(melt))
         .route("/v1/swap", post(swap))
         // Ark extensions
@@ -46,6 +48,13 @@ async fn mint_quote(
     Ok(Json(b.mint_quote(req).await?))
 }
 
+async fn get_mint_quote(
+    State(b): State<AppState>,
+    Path(quote_id): Path<String>,
+) -> Result<Json<MintQuoteBolt11Response>> {
+    Ok(Json(b.get_mint_quote(&quote_id).await?))
+}
+
 async fn mint(
     State(b): State<AppState>,
     Json(req): Json<MintBolt11Request>,
@@ -58,6 +67,13 @@ async fn melt_quote(
     Json(req): Json<MeltQuoteBolt11Request>,
 ) -> Result<Json<MeltQuoteBolt11Response>> {
     Ok(Json(b.melt_quote(req).await?))
+}
+
+async fn get_melt_quote(
+    State(b): State<AppState>,
+    Path(quote_id): Path<String>,
+) -> Result<Json<MeltQuoteBolt11Response>> {
+    Ok(Json(b.get_melt_quote(&quote_id).await?))
 }
 
 async fn melt(

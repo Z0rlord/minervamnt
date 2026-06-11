@@ -86,6 +86,17 @@ async fn full_mint_swap_melt_flow_over_http() {
     assert_eq!(quote["state"], "PAID");
     let quote_id = quote["quote"].as_str().unwrap().to_string();
 
+    let (status, polled) = request(
+        &app,
+        "GET",
+        &format!("/v1/mint/quote/bolt11/{quote_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(polled["quote"], quote_id);
+    assert_eq!(polled["state"], "PAID");
+
     // 2. Mint: one 64-sat blinded output (amounts must be powers of two).
     let outputs = json!([{ "amount": 64, "id": KEYSET_ID, "B_": "02blinded-a" }]);
     let (status, minted) = request(

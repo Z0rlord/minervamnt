@@ -1,11 +1,44 @@
+# Rust
 /target/
 **/*.rs.bk
 *.pdb
+
+# Secrets & local env — never commit
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+credentials.json
+secrets.toml
+.doppler/
+
+# Internal operator config (use local copy; not for public repo)
+doppler.yaml
+
+# Databases & runtime data
+/data/
 *.sqlite
 *.sqlite3
 *.db
+*.db-*
+
+# Cloud / deploy tooling caches
+.wrangler/
+.cloudflared/
+*.tunnel.json
+
+# OS & editors
 .DS_Store
 .idea/
 .vscode/
-.wrangler/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

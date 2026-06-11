@@ -230,6 +230,22 @@ impl MintBackend {
         })
     }
 
+    /// NUT-04: poll mint quote state by id.
+    pub async fn get_mint_quote(&self, quote_id: &str) -> Result<MintQuoteBolt11Response> {
+        let quotes = self.mint_quotes.lock().unwrap();
+        let quote = quotes
+            .get(quote_id)
+            .ok_or_else(|| MintError::QuoteNotFound(quote_id.into()))?;
+        Ok(MintQuoteBolt11Response {
+            quote: quote_id.into(),
+            request: format!("lnbcmock1{quote_id}"),
+            amount: quote.amount_sat,
+            unit: "sat".into(),
+            state: quote.state,
+            expiry: quote.expiry,
+        })
+    }
+
     pub async fn mint(&self, req: MintBolt11Request) -> Result<MintBolt11Response> {
         let amount_sat = {
             let quotes = self.mint_quotes.lock().unwrap();
@@ -374,12 +390,28 @@ impl MintBackend {
         );
 
         Ok(MeltQuoteBolt11Response {
-            quote: quote_id,
+            quote: quote_id.clone(),
             amount: amount_sat,
             fee_reserve: fee_reserve_sat,
             unit: "sat".into(),
             state: QuoteState::Unpaid,
             expiry,
+        })
+    }
+
+    /// NUT-05: poll melt quote state by id.
+    pub async fn get_melt_quote(&self, quote_id: &str) -> Result<MeltQuoteBolt11Response> {
+        let quotes = self.melt_quotes.lock().unwrap();
+        let quote = quotes
+            .get(quote_id)
+            .ok_or_else(|| MintError::QuoteNotFound(quote_id.into()))?;
+        Ok(MeltQuoteBolt11Response {
+            quote: quote_id.into(),
+            amount: quote.amount_sat,
+            fee_reserve: quote.fee_reserve_sat,
+            unit: "sat".into(),
+            state: quote.state,
+            expiry: quote.expiry,
         })
     }
 
