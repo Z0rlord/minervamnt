@@ -1,120 +1,82 @@
-# Cloudflare Pages — landing page
+# Cloudflare Pages — static landing (optional)
 
-Static landing page for [minervamnt.xyz](https://minervamnt.xyz). Served from Cloudflare Pages; no Pi or tunnel required.
+Deploy the contents of `landing/` as a static site on [Cloudflare Pages](https://developers.cloudflare.com/pages/).
 
-## Project
+Use this when you want a public marketing or status page **without** running the
+mint API on the same hostname.
 
-| Item | Value |
-|------|-------|
-| Pages project | `minervamnt` |
-| Default URL | `https://minervamnt.pages.dev` |
-| Custom domains | `minervamnt.xyz`, `www.minervamnt.xyz` |
-| Source directory | `landing/` (contains `index.html`) |
-| Cloudflare account ID | `dfc6e38d5b254f0f8ffac8a0e554112a` |
+## Prerequisites
 
-## Manual deploy (Mac)
+- Cloudflare account with Pages enabled
+- API token with **Cloudflare Pages — Edit** (and DNS edit if attaching custom domains)
+- Node.js / `npx` for manual deploys, or GitHub Actions (see below)
 
-Requires Node.js / `npx` (or portable Node in `/tmp`).
+## Manual deploy
+
+Set credentials in your environment (never commit tokens):
 
 ```bash
-# From repo root — inject token from Doppler (project minervamnt; see doppler.yaml)
-doppler run -- bash -c '
-  npx wrangler@4 pages deploy landing \
-    --project-name=minervamnt \
-    --branch=main \
-    --commit-dirty=true
-'
+export CLOUDFLARE_API_TOKEN="your-token"
+export CLOUDFLARE_ACCOUNT_ID="your-account-id"
+
+npx wrangler@4 pages deploy landing \
+  --project-name=your-pages-project \
+  --branch=main
 ```
 
-First-time project creation (if missing):
+Create the Pages project once (if it does not exist):
 
 ```bash
-doppler run --project minervamnt --config dev -- bash -c '
+curl -sS -X POST \
+  -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects" \
+  -d '{"name":"your-pages-project","production_branch":"main"}'
+```
+
+## Custom domain
+
+Attach domains via the Cloudflare dashboard or API. Point DNS CNAME records at
+your `*.pages.dev` hostname.
+
+Example API attach:
+
+```bash
+for host in mint.example.com www.mint.example.com; do
   curl -sS -X POST \
     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
     -H "Content-Type: application/json" \
-    "https://api.cloudflare.com/client/v4/accounts/dfc6e38d5b254f0f8ffac8a0e554112a/pages/projects" \
-    -d "{\"name\":\"minervamnt\",\"production_branch\":\"main\"}"
-'
+    "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/your-pages-project/domains" \
+    -d "{\"name\":\"$host\"}"
+done
 ```
 
-## Custom domain & DNS
+## Mint API on a subdomain (optional)
 
-Custom domains are attached to the Pages project via API or dashboard. DNS for `minervamnt.xyz` must point at Pages, not the Pi tunnel.
+A common production layout:
 
-**Current DNS** (zone `minervamnt.xyz`):
+| Host | Serves |
+| ---- | ------ |
+| `mint.example.com` | Static landing (Pages) |
+| `api.mint.example.com` | Mint HTTP API (tunnel or reverse proxy → `:3338`) |
 
-| Name | Type | Content | Proxied |
-|------|------|---------|---------|
-| `minervamnt.xyz` | CNAME | `minervamnt.pages.dev` | yes |
-| `www.minervamnt.xyz` | CNAME | `minervamnt.pages.dev` | yes |
+See `deploy/cloudflared/config.yml.example` for tunnel ingress patterns.
 
-**Previous DNS** (tunnel — removed):
+## GitHub Actions
 
-| Name | Type | Content |
-|------|------|---------|
-| `minervamnt.xyz` | CNAME | `<tunnel-id>.cfargotunnel.com` |
+`.github/workflows/deploy-landing.yml` deploys when `landing/**` changes on `main`.
 
-Update DNS with the DNS-scoped token (`CLOUDFLARE_DNS_TOKEN` in Doppler):
+Add **repository secrets** (Settings → Secrets → Actions):
 
-```bash
-doppler run --project minervamnt --config dev -- bash -c '
-  API="https://api.cloudflare.com/client/v4"
-  AUTH="Authorization: Bearer $CLOUDFLARE_DNS_TOKEN"
-  ZONE="$CLOUDFLARE_ZONE_ID_MINERVAMNT"
+| Secret | Value |
+| ------ | ----- |
+| `CLOUDFLARE_API_TOKEN` | Pages deploy token |
+| `CLOUDFLARE_ACCOUNT_ID` | Your Cloudflare account ID |
 
-  # Patch apex record (replace RECORD_ID from list call)
-  curl -sS -X PATCH -H "$AUTH" -H "Content-Type: application/json" \
-    "$API/zones/$ZONE/dns_records/<RECORD_ID>" \
-    -d "{\"type\":\"CNAME\",\"name\":\"minervamnt.xyz\",\"content\":\"minervamnt.pages.dev\",\"proxied\":true,\"ttl\":1}"
-'
-```
-
-Attach domains to Pages (uses `CLOUDFLARE_API_TOKEN`):
-
-```bash
-doppler run --project minervamnt --config dev -- bash -c '
-  API="https://api.cloudflare.com/client/v4"
-  AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-  ACCOUNT="$CLOUDFLARE_ACCOUNT_ID"
-
-  for host in minervamnt.xyz www.minervamnt.xyz; do
-    curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" \
-      "$API/accounts/$ACCOUNT/pages/projects/minervamnt/domains" \
-      -d "{\"name\":\"$host\"}"
-  done
-'
-```
+Do not store these in the repository.
 
 ## Verify
 
 ```bash
-curl -s -o /dev/null -w "root: %{http_code}\n" https://minervamnt.xyz/
-curl -s https://minervamnt.xyz/ | head -5
-curl -s -o /dev/null -w "health: %{http_code}\n" https://minervamnt.xyz/health
-curl -s -o /dev/null -w "v1/info: %{http_code}\n" https://minervamnt.xyz/v1/info
+curl -sI "https://your-pages-project.pages.dev/" | head -5
 ```
-
-Expected: HTTP 200 on `/` with HTML landing page. `/health` and `/v1/info` return the same static page (no mint JSON).
-
-## Pi tunnel (optional)
-
-The `cloudflared` tunnel on pi5 can stay **stopped**. DNS no longer routes to the tunnel, so the site works even when Pi SSH is down.
-
-When re-enabling the mint API later:
-
-- Use a subdomain (e.g. `api.minervamnt.xyz` → tunnel → `:3338`), or
-- Switch apex DNS back to the tunnel and disable Pages custom domain.
-
-Do **not** re-enable `minerva-mint` until you intend to serve the API again.
-
-## GitHub Actions
-
-`.github/workflows/deploy-landing.yml` deploys on push to `main` when `landing/**` changes.
-
-Add repository secrets:
-
-| Secret | Source |
-|--------|--------|
-| `CLOUDFLARE_API_TOKEN` | Doppler `CLOUDFLARE_API_TOKEN` |
-| `CLOUDFLARE_ACCOUNT_ID` | `dfc6e38d5b254f0f8ffac8a0e554112a` |

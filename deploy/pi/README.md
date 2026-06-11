@@ -1,94 +1,84 @@
-# Raspberry Pi 5 (pi5) — applied configuration
+# Edge node deployment (optional reference)
 
-Reference for what is already configured on **pi5**. Do **not** re-run destructive steps (disk wipe, full re-sync, UFW lockout) without a deliberate plan.
+Example notes for running Minerva Mint on a small Linux host (ARM SBC, VPS, or
+home server). **Adapt paths, users, and network layout to your environment.**
 
-## Host
+This is not a turnkey installer — review each script before running on production
+hardware.
 
-| Item | Value |
-|------|-------|
-| Hostname | `pi5` |
-| OS user | `ubuntu` |
-| Tailscale IP | `100.75.188.125` |
-| SSH | `ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125` |
+## Suggested layout
 
-## Bitcoin Core 31.0
+| Component | Typical role |
+| --------- | ------------ |
+| **Mint host** | Runs `minerva-mint` binary, SQLite data dir |
+| **Bitcoin Core** | Same host or reachable via private RPC |
+| **Reverse proxy / tunnel** | TLS termination (nginx, Caddy, Cloudflare Tunnel, etc.) |
 
-- **datadir:** `/mnt/btcdata/bitcoin`
-- **Mode:** full node with `txindex=1`
-- **RPC:** `http://100.75.188.125:8332` (Tailscale only)
-- **RPC user:** `minerva`
-- **RPC password:** stored on Pi at `/etc/bitcoin/rpc-credentials` (root-only, `600`)
-- **UFW:** port `8332` allowed on `tailscale0` only
+## Environment variables for helper scripts
 
-Copy the password to your mint host `.env` (never commit it):
+Scripts under `deploy/pi/` that SSH to a remote host expect:
 
 ```bash
-ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 \
-  'sudo cat /etc/bitcoin/rpc-credentials'
+export DEPLOY_HOST="user@your-mint-host.example"   # SSH target
+export DEPLOY_SSH_KEY="${HOME}/.ssh/your_key"      # optional; default ssh-agent
+export MINT_DOMAIN="mint.example.com"              # public hostname
 ```
 
-### Sync status
-
-Initial block download (IBD) takes **days**. Check progress:
+Example:
 
 ```bash
-bitcoin-cli -rpcconnect=100.75.188.125 -rpcuser=minerva -rpcpassword='<password>' \
-  getblockchaininfo | jq '{blocks, headers, verificationprogress, initialblockdownload}'
+export DEPLOY_HOST="minerva@203.0.113.10"
+bash deploy/pi/deploy-landing-from-mac.sh
 ```
 
-Or from any Tailscale peer with curl:
+## Bitcoin Core
+
+`install-bitcoind.sh` is a **reference** for installing Bitcoin Core with RPC
+bound to a private interface (example uses a VPN interface name). Edit
+`rpcallowip`, datadir, and systemd unit paths before use.
+
+Store RPC credentials outside git:
 
 ```bash
-curl -s --user minerva:'<password>' \
-  --data-binary '{"jsonrpc":"1.0","id":"sync","method":"getblockchaininfo","params":[]}' \
-  -H 'content-type: text/plain;' \
-  http://100.75.188.125:8332/ | jq '.result | {blocks, headers, verificationprogress, initialblockdownload}'
+# On the node — root-only file, mode 600
+BITCOIN_RPC_USER=bitcoinrpc
+BITCOIN_RPC_PASSWORD=<generated>
 ```
 
-## cloudflared
+Copy values into your mint host `.env` (see `.env.example`).
 
-- Binary installed on pi5
-- Tunnel for **minervamnt.xyz** still needs a one-time Cloudflare login (see root `README.md` and `deploy/cloudflared/config.yml.example`)
+## systemd
 
-## Minerva Mint service
-
-After building the binary on pi5, install the systemd unit:
+Example units live in `deploy/systemd/`:
 
 ```bash
 sudo cp deploy/systemd/minerva-mint.service /etc/systemd/system/
+# Edit User=, WorkingDirectory=, EnvironmentFile= for your layout
 sudo systemctl daemon-reload
 sudo systemctl enable --now minerva-mint
 ```
 
-Ensure `.env` on the Pi has `BITCOIN_RPC_PASSWORD` from `/etc/bitcoin/rpc-credentials`.
+## Landing-only mode
 
-## Landing page mode (mint disabled)
-
-To serve a static page at minervamnt.xyz without the mint API:
+To serve static HTML without the mint API:
 
 ```bash
-cd /opt/minervamnt && git pull origin main
-bash deploy/pi/enable-landing-mode.sh
+bash deploy/pi/enable-landing-mode.sh    # on the host
+bash deploy/pi/enable-mint-mode.sh       # restore mint API
 ```
 
-Re-enable mint API:
+## Recovery scripts
 
-```bash
-bash deploy/pi/enable-mint-mode.sh
-```
+`recover-boot-drive-mac.sh` and `run-recover-noninteractive.sh` are **operator
+maintenance utilities** for SD/USB recovery workflows. Before use:
 
-## macOS SD recovery (from Mac)
+1. Replace placeholder SSH public keys in the cloud-init snippet with your own.
+2. Remove or edit any host-specific paths in the script output.
+3. Do not run destructive disk operations without backups.
 
-Update the repo, then run the non-interactive wrapper (logs to `/tmp/pi-recover-*.log`):
+## Security checklist
 
-```bash
-cd ~/Projects/minervamnt && git pull origin main && bash deploy/pi/run-recover-noninteractive.sh
-```
-
-If `git pull` complains about missing upstream tracking, set it once:
-
-```bash
-git fetch origin && git branch --set-upstream-to=origin/main main
-```
-
-Or always use `git pull origin main` (the recovery runner does this automatically).
+- [ ] RPC not exposed to the public internet
+- [ ] Firewall allows admin access only from trusted networks
+- [ ] `.env` permissions `600`, owned by the service user
+- [ ] Separate signatory host in production (see [trust model](../../docs/trust-model.md))

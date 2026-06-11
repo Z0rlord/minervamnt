@@ -43,7 +43,7 @@ pub struct ArkConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BitcoinConfig {
     /// Bitcoin Core RPC endpoint. For Minerva Mint this is the Raspberry Pi 5
-    /// full node reached over Tailscale, e.g. `http://100.x.y.z:8332`.
+    /// JSON-RPC URL for your Bitcoin Core node (localhost, VPN, or private network).
     pub rpc_url: String,
     #[serde(default)]
     pub rpc_user: Option<String>,
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(cfg.ark.refresh_threshold_blocks, 144);
         assert_eq!(cfg.ark.default_vtxo_expiry, 25920);
         assert!(cfg.liquidity.min_vtxo_reserve_msat > 0);
-        assert_eq!(cfg.bitcoin.rpc_url, "http://100.75.188.125:8332");
+        assert_eq!(cfg.bitcoin.rpc_url, "http://127.0.0.1:8332");
         assert_eq!(cfg.trust.vtxo_verify_mode, "scaffold");
         assert!(cfg.trust.signatory_policy_enforced);
     }
@@ -241,7 +241,7 @@ mod tests {
 
         let config = AppConfig::load("config.toml").expect("config should load");
         assert_eq!(config.mint.name, "Minerva Mint");
-        assert_eq!(config.mint.url, "https://minervamnt.xyz");
+        assert_eq!(config.mint.url, "https://mint.example.com");
         assert_eq!(config.bitcoin.rpc_url, "http://100.64.0.5:8332");
         assert_eq!(config.bitcoin.rpc_user.as_deref(), Some("pi"));
         assert_eq!(config.bitcoin.rpc_password.as_deref(), Some("secret"));

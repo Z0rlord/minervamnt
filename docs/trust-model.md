@@ -2,7 +2,7 @@
 
 This document describes how Minerva Mint proves solvency and limits operator
 rug-pull capability. It is the public specification for auditors, wallet
-integrators, and users evaluating `https://minervamnt.xyz`.
+integrators, and users evaluating a Minerva Mint deployment.
 
 ## Threat model
 

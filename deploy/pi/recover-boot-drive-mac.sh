@@ -207,7 +207,7 @@ users:
   - default
   - name: ubuntu
     ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINfFkM4FVlwsWlJ7XpmQelf8SC5SLd9bxgL1uVKeaz+7 raspi
+      - ssh-ed25519 AAAA...REPLACE_WITH_YOUR_PUBLIC_KEY... comment
 
 packages:
   - openssh-server
@@ -279,13 +279,14 @@ cat <<EOF
 1. Reinsert SD card in Pi 5 (SSD can stay attached to Pi — Bitcoin data preserved)
 2. Power on Pi, wait 2-3 min for Wi-Fi + Tailscale
 3. Test SSH:
-   ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125
+   ssh -i ~/.ssh/your_key user@YOUR_HOST
 4. Verify services:
    systemctl is-active ssh bitcoind tailscaled
    df -h /mnt/btcdata
    sudo -u bitcoin bitcoin-cli -conf=/etc/bitcoin/bitcoin.conf getblockchaininfo | head -5
-5. If SSH works, deploy landing page:
-   cd ~/Projects/minervamnt && bash deploy/pi/deploy-landing-from-mac.sh
+5. If SSH works, deploy landing page (set DEPLOY_HOST first):
+   export DEPLOY_HOST=user@YOUR_HOST
+   bash deploy/pi/deploy-landing-from-mac.sh
 
 SSD UUID expected in fstab: e59157e3-3014-44f9-afa5-0e3d02f39a8d -> /mnt/btcdata
 EOF

@@ -1,27 +1,22 @@
 [Unit]
-Description=Minerva Mint — Ark-backed Cashu mint
+Description=Minerva Mint — Ark-backed Cashu server
 Documentation=https://github.com/Z0rlord/minervamnt
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=minerva
-Group=minerva
+User=<USER>
+Group=<USER>
 WorkingDirectory=/opt/minervamnt
 EnvironmentFile=/opt/minervamnt/.env
 ExecStart=/opt/minervamnt/target/release/minerva-mint
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=minerva-mint
 
-# Hardening
+# Hardening (adjust ReadWritePaths for your data dir)
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/opt/minervamnt/data
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
