@@ -1,46 +1,52 @@
-use minerva_mint::api::{self, build_state};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tracing_subscriber::EnvFilter;
+
+use minerva_mint::api::router;
 use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::mint_backend::MintBackend;
-use minerva_mint::scheduler::spawn_refresh_scheduler;
+use minerva_mint::tasks::{run_health_monitor, run_refresh_scheduler};
 use minerva_mint::vtxo_inventory::VtxoInventory;
 use minerva_mint::AppConfig;
-use std::sync::Arc;
-use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
     let config_path = std::env::var("MINERVA_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
     let config = AppConfig::load(&config_path)?;
+    tracing::info!(config = %config_path, mint = %config.mint.name, "configuration loaded");
 
-    let ark = Arc::new(MockArkClient::new(
-        config.ark.server_pubkey.clone(),
-        config.ark.default_vtxo_expiry,
+    if let Some(parent) = PathBuf::from(&config.database.path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let inventory = VtxoInventory::open(&config.database.path)?;
+
+    tracing::warn!("using MOCK Ark client — no real ASP integration yet");
+    let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+
+    let backend = Arc::new(MintBackend::new(config.clone(), ark, inventory));
+
+    tokio::spawn(run_refresh_scheduler(
+        backend.clone(),
+        Duration::from_secs(config.scheduler.refresh_interval_secs),
     ));
-    let inventory = Arc::new(VtxoInventory::new(
-        &config.database.path,
-        config.ark.refresh_threshold_blocks,
-    )?);
-    let backend = Arc::new(MintBackend::new(
-        ark.clone(),
-        inventory.clone(),
-        config.liquidity.clone(),
+    tokio::spawn(run_health_monitor(
+        backend.clone(),
+        Duration::from_secs(60),
     ));
 
-    spawn_refresh_scheduler(
-        ark,
-        inventory,
-        config.scheduler.refresh_interval_secs,
-    );
-
-    let state = build_state(config.clone(), backend);
-    let app = api::router(state);
-
-    let addr = format!("{}:{}", config.server.host, config.server.port);
-    info!(%addr, mint = %config.mint.name, url = %config.mint.url, "starting Minerva Mint");
+    let app = router(backend);
+    let addr = config.bind_addr();
+    tracing::info!(%addr, url = %config.mint.url, "minerva-mint listening");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())

@@ -1,321 +1,442 @@
-use crate::ark_client::Vtxo;
-use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+//! VTXO inventory manager: SQLite-backed mapping between outstanding ecash
+//! tokens and the Ark VTXOs that back them.
+//!
+//! Responsibilities:
+//! - track every VTXO the mint holds (`vtxo_inventory`)
+//! - map issued tokens to backing VTXOs (`token_vtxo_map`)
+//! - surface a refresh queue of VTXOs nearing expiry
+//! - report free (unallocated) reserve for liquidity decisions
+
+use crate::error::{MintError, Result};
+use crate::types::{Vtxo, VtxoStatus};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
-use std::sync::Mutex;
-use thiserror::Error;
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VtxoStatus {
-    Active,
-    Refreshing,
-    Spent,
-    Exited,
-}
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS vtxo_inventory (
+    id            TEXT PRIMARY KEY,
+    amount_msat   INTEGER NOT NULL,
+    status        TEXT NOT NULL CHECK (status IN ('active','refreshing','spent','exited')),
+    created_at    INTEGER NOT NULL,
+    expires_at    INTEGER NOT NULL,
+    branch_tx_hex TEXT NOT NULL,
+    leaf_tx_hex   TEXT NOT NULL,
+    asp_pubkey    TEXT NOT NULL DEFAULT ''
+);
 
-impl VtxoStatus {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::Refreshing => "refreshing",
-            Self::Spent => "spent",
-            Self::Exited => "exited",
-        }
-    }
+CREATE TABLE IF NOT EXISTS token_vtxo_map (
+    token_id    TEXT PRIMARY KEY,
+    vtxo_id     TEXT NOT NULL REFERENCES vtxo_inventory(id),
+    amount_msat INTEGER NOT NULL,
+    issued_at   INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
 
-    fn from_str(value: &str) -> Result<Self, InventoryError> {
-        match value {
-            "active" => Ok(Self::Active),
-            "refreshing" => Ok(Self::Refreshing),
-            "spent" => Ok(Self::Spent),
-            "exited" => Ok(Self::Exited),
-            other => Err(InventoryError::InvalidStatus(other.to_string())),
-        }
-    }
-}
+CREATE INDEX IF NOT EXISTS idx_vtxo_status_expiry ON vtxo_inventory(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_map_vtxo ON token_vtxo_map(vtxo_id);
+"#;
 
-#[derive(Debug, Error)]
-pub enum InventoryError {
-    #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
-    #[error("vtxo not found: {0}")]
-    NotFound(String),
-    #[error("insufficient active liquidity")]
-    InsufficientLiquidity,
-    #[error("invalid status: {0}")]
-    InvalidStatus(String),
+#[derive(Debug, Clone)]
+pub struct VtxoRecord {
+    pub vtxo: Vtxo,
+    pub status: VtxoStatus,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Clone)]
-pub struct InventoryVtxo {
-    pub id: String,
+pub struct TokenMapping {
+    pub token_id: String,
+    pub vtxo_id: String,
     pub amount_msat: u64,
-    pub status: VtxoStatus,
-    pub expires_at: DateTime<Utc>,
-    pub branch_tx_hex: String,
-    pub leaf_tx_hex: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
 }
 
+/// SQLite-backed inventory. `Connection` is not `Sync`, so it lives behind a
+/// `Mutex`; all queries here are short-lived point lookups, which is fine for
+/// a scaffold (swap for a pool / sqlx in production).
+#[derive(Clone)]
 pub struct VtxoInventory {
-    conn: Mutex<Connection>,
-    refresh_threshold: chrono::Duration,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl VtxoInventory {
-    pub fn new(path: impl AsRef<Path>, refresh_threshold_blocks: u64) -> Result<Self, InventoryError> {
-        if let Some(parent) = path.as_ref().parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                InventoryError::Database(rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
-            })?;
-        }
-
-        let inventory = Self {
-            conn: Mutex::new(Connection::open(path)?),
-            refresh_threshold: chrono::Duration::minutes(refresh_threshold_blocks as i64),
-        };
-        inventory.migrate()?;
-        Ok(inventory)
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::from_connection(Connection::open(path)?)
     }
 
-    pub fn in_memory(refresh_threshold_blocks: u64) -> Result<Self, InventoryError> {
-        let inventory = Self {
-            conn: Mutex::new(Connection::open_in_memory()?),
-            refresh_threshold: chrono::Duration::minutes(refresh_threshold_blocks as i64),
-        };
-        inventory.migrate()?;
-        Ok(inventory)
+    pub fn open_in_memory() -> Result<Self> {
+        Self::from_connection(Connection::open_in_memory()?)
     }
 
-    fn migrate(&self) -> Result<(), InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS vtxo_inventory (
-                id TEXT PRIMARY KEY,
-                amount_msat BIGINT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('active', 'refreshing', 'spent', 'exited')),
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                expires_at TEXT NOT NULL,
-                branch_tx_hex TEXT,
-                leaf_tx_hex TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS token_vtxo_map (
-                token_id TEXT PRIMARY KEY,
-                vtxo_id TEXT NOT NULL,
-                amount_msat BIGINT NOT NULL,
-                issued_at TEXT NOT NULL DEFAULT (datetime('now')),
-                expires_at TEXT NOT NULL,
-                FOREIGN KEY (vtxo_id) REFERENCES vtxo_inventory(id)
-            );
-            "#,
-        )?;
-        Ok(())
+    fn from_connection(conn: Connection) -> Result<Self> {
+        conn.execute_batch(SCHEMA)?;
+        Ok(VtxoInventory {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
-    pub fn insert_vtxo(&self, vtxo: &Vtxo, expires_at: DateTime<Utc>) -> Result<(), InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Register a freshly boarded VTXO as active inventory.
+    pub fn insert_vtxo(&self, vtxo: &Vtxo) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO vtxo_inventory (id, amount_msat, status, expires_at, branch_tx_hex, leaf_tx_hex)
-             VALUES (?1, ?2, 'active', ?3, ?4, ?5)",
+            "INSERT INTO vtxo_inventory
+               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey)
+             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7)",
             params![
                 vtxo.id,
-                vtxo.amount_msat,
-                expires_at.to_rfc3339(),
-                vtxo.branch_tx_hex,
-                vtxo.leaf_tx_hex
+                vtxo.amount_msat as i64,
+                Self::now() as i64,
+                vtxo.expiry as i64,
+                vtxo.branch_tx,
+                vtxo.leaf_tx,
+                vtxo.asp_pubkey,
             ],
         )?;
         Ok(())
     }
 
-    pub fn allocate_vtxo_for_tokens(&self, amount_msat: u64) -> Result<InventoryVtxo, InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        let mut stmt = conn.prepare(
-            "SELECT id, amount_msat, status, expires_at, branch_tx_hex, leaf_tx_hex
-             FROM vtxo_inventory
-             WHERE status = 'active' AND amount_msat >= ?1
-             ORDER BY amount_msat ASC
-             LIMIT 1",
-        )?;
-
-        let mut rows = stmt.query(params![amount_msat])?;
-        if let Some(row) = rows.next()? {
-            return Ok(InventoryVtxo {
-                id: row.get(0)?,
-                amount_msat: row.get(1)?,
-                status: VtxoStatus::from_str(&row.get::<_, String>(2)?)?,
-                expires_at: parse_ts(&row.get::<_, String>(3)?),
-                branch_tx_hex: row.get(4)?,
-                leaf_tx_hex: row.get(5)?,
-            });
-        }
-
-        Err(InventoryError::InsufficientLiquidity)
+    pub fn get_vtxo(&self, vtxo_id: &str) -> Result<Option<VtxoRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let rec = conn
+            .query_row(
+                "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey
+                 FROM vtxo_inventory WHERE id = ?1",
+                params![vtxo_id],
+                Self::row_to_record,
+            )
+            .optional()?;
+        Ok(rec)
     }
 
-    pub fn map_token_to_vtxo(
-        &self,
-        token_id: &str,
-        vtxo_id: &str,
-        amount_msat: u64,
-        expires_at: DateTime<Utc>,
-    ) -> Result<(), InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        conn.execute(
-            "INSERT INTO token_vtxo_map (token_id, vtxo_id, amount_msat, expires_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![token_id, vtxo_id, amount_msat, expires_at.to_rfc3339()],
+    fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<VtxoRecord> {
+        let status_str: String = row.get(2)?;
+        Ok(VtxoRecord {
+            vtxo: Vtxo {
+                id: row.get(0)?,
+                amount_msat: row.get::<_, i64>(1)? as u64,
+                expiry: row.get::<_, i64>(4)? as u64,
+                branch_tx: row.get(5)?,
+                leaf_tx: row.get(6)?,
+                asp_pubkey: row.get(7)?,
+            },
+            status: VtxoStatus::parse(&status_str).unwrap_or(VtxoStatus::Spent),
+            created_at: row.get::<_, i64>(3)? as u64,
+        })
+    }
+
+    pub fn set_status(&self, vtxo_id: &str, status: VtxoStatus) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE vtxo_inventory SET status = ?1 WHERE id = ?2",
+            params![status.as_str(), vtxo_id],
         )?;
+        if n == 0 {
+            return Err(MintError::MappingNotFound(vtxo_id.to_string()));
+        }
         Ok(())
     }
 
-    pub fn release_vtxo_mapping(&self, token_id: &str) -> Result<(), InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        let vtxo_id: Option<String> = match conn.query_row(
-            "SELECT vtxo_id FROM token_vtxo_map WHERE token_id = ?1",
-            params![token_id],
-            |row| row.get(0),
-        ) {
-            Ok(value) => Some(value),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(err) => return Err(err.into()),
-        };
+    /// Replace an old VTXO with its refreshed successor atomically: the old
+    /// row is marked spent, the new one inserted active, and all token
+    /// mappings are repointed.
+    pub fn replace_refreshed(&self, old_id: &str, fresh: &Vtxo) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE vtxo_inventory SET status = 'spent' WHERE id = ?1",
+            params![old_id],
+        )?;
+        tx.execute(
+            "INSERT INTO vtxo_inventory
+               (id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey)
+             VALUES (?1, ?2, 'active', ?3, ?4, ?5, ?6, ?7)",
+            params![
+                fresh.id,
+                fresh.amount_msat as i64,
+                Self::now() as i64,
+                fresh.expiry as i64,
+                fresh.branch_tx,
+                fresh.leaf_tx,
+                fresh.asp_pubkey,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE token_vtxo_map SET vtxo_id = ?1, expires_at = ?2 WHERE vtxo_id = ?3",
+            params![fresh.id, fresh.expiry as i64, old_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 
-        let Some(vtxo_id) = vtxo_id else {
-            return Err(InventoryError::NotFound(token_id.to_string()));
-        };
+    /// Map a newly issued token (batch) to a backing VTXO.
+    ///
+    /// Picks the active VTXO with the most free (unallocated) capacity that
+    /// can absorb `amount_msat`. Returns the chosen VTXO id.
+    pub fn allocate_vtxo_for_tokens(&self, token_id: &str, amount_msat: u64) -> Result<String> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT v.id, v.expires_at,
+                        v.amount_msat - COALESCE((
+                            SELECT SUM(m.amount_msat) FROM token_vtxo_map m WHERE m.vtxo_id = v.id
+                        ), 0) AS free
+                 FROM vtxo_inventory v
+                 WHERE v.status = 'active'
+                   AND free >= ?1
+                 ORDER BY free DESC
+                 LIMIT 1",
+                params![amount_msat as i64],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64)),
+            )
+            .optional()?;
+
+        let (vtxo_id, expires_at) = row.ok_or(MintError::InsufficientLiquidity {
+            needed_msat: amount_msat,
+        })?;
+
+        conn.execute(
+            "INSERT INTO token_vtxo_map (token_id, vtxo_id, amount_msat, issued_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                token_id,
+                vtxo_id,
+                amount_msat as i64,
+                Self::now() as i64,
+                expires_at as i64,
+            ],
+        )?;
+        Ok(vtxo_id)
+    }
+
+    /// Release the token -> VTXO mapping (token melted or swapped away).
+    pub fn release_vtxo_mapping(&self, token_id: &str) -> Result<TokenMapping> {
+        let conn = self.conn.lock().unwrap();
+        let mapping = conn
+            .query_row(
+                "SELECT token_id, vtxo_id, amount_msat, issued_at, expires_at
+                 FROM token_vtxo_map WHERE token_id = ?1",
+                params![token_id],
+                |row| {
+                    Ok(TokenMapping {
+                        token_id: row.get(0)?,
+                        vtxo_id: row.get(1)?,
+                        amount_msat: row.get::<_, i64>(2)? as u64,
+                        issued_at: row.get::<_, i64>(3)? as u64,
+                        expires_at: row.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| MintError::MappingNotFound(token_id.to_string()))?;
 
         conn.execute(
             "DELETE FROM token_vtxo_map WHERE token_id = ?1",
             params![token_id],
         )?;
-        conn.execute(
-            "UPDATE vtxo_inventory SET status = 'spent' WHERE id = ?1",
-            params![vtxo_id],
-        )?;
-        Ok(())
+        Ok(mapping)
     }
 
-    pub fn get_refresh_queue(&self) -> Result<Vec<InventoryVtxo>, InventoryError> {
-        let threshold = (Utc::now() + self.refresh_threshold).to_rfc3339();
-        let conn = self.conn.lock().expect("inventory mutex");
+    pub fn get_mapping(&self, token_id: &str) -> Result<Option<TokenMapping>> {
+        let conn = self.conn.lock().unwrap();
+        let mapping = conn
+            .query_row(
+                "SELECT token_id, vtxo_id, amount_msat, issued_at, expires_at
+                 FROM token_vtxo_map WHERE token_id = ?1",
+                params![token_id],
+                |row| {
+                    Ok(TokenMapping {
+                        token_id: row.get(0)?,
+                        vtxo_id: row.get(1)?,
+                        amount_msat: row.get::<_, i64>(2)? as u64,
+                        issued_at: row.get::<_, i64>(3)? as u64,
+                        expires_at: row.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(mapping)
+    }
+
+    /// Active VTXOs that expire within `threshold_blocks` of `current_height`,
+    /// soonest first. These need a refresh round.
+    pub fn get_refresh_queue(
+        &self,
+        current_height: u64,
+        threshold_blocks: u64,
+    ) -> Result<Vec<VtxoRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = current_height + threshold_blocks;
         let mut stmt = conn.prepare(
-            "SELECT id, amount_msat, status, expires_at, branch_tx_hex, leaf_tx_hex
+            "SELECT id, amount_msat, status, created_at, expires_at, branch_tx_hex, leaf_tx_hex, asp_pubkey
              FROM vtxo_inventory
              WHERE status = 'active' AND expires_at <= ?1
              ORDER BY expires_at ASC",
         )?;
-        let rows = stmt.query_map(params![threshold], |row| {
-            Ok(InventoryVtxo {
-                id: row.get(0)?,
-                amount_msat: row.get(1)?,
-                status: VtxoStatus::from_str(&row.get::<_, String>(2)?).unwrap_or(VtxoStatus::Active),
-                expires_at: parse_ts(&row.get::<_, String>(3)?),
-                branch_tx_hex: row.get(4)?,
-                leaf_tx_hex: row.get(5)?,
-            })
-        })?;
-
-        rows.collect::<Result<Vec<_>, _>>().map_err(InventoryError::from)
-    }
-
-    pub fn update_vtxo_after_refresh(&self, old_id: &str, refreshed: &Vtxo, expires_at: DateTime<Utc>) -> Result<(), InventoryError> {
-        {
-            let conn = self.conn.lock().expect("inventory mutex");
-            conn.execute(
-                "UPDATE vtxo_inventory SET status = 'spent' WHERE id = ?1",
-                params![old_id],
-            )?;
-            conn.execute(
-                "UPDATE token_vtxo_map SET vtxo_id = ?1 WHERE vtxo_id = ?2",
-                params![refreshed.id, old_id],
-            )?;
+        let rows = stmt.query_map(params![cutoff as i64], Self::row_to_record)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
         }
-        self.insert_vtxo(refreshed, expires_at)?;
-        Ok(())
+        Ok(out)
     }
 
-    pub fn mark_refreshing(&self, vtxo_id: &str) -> Result<(), InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        let updated = conn.execute(
-            "UPDATE vtxo_inventory SET status = 'refreshing' WHERE id = ?1 AND status = 'active'",
-            params![vtxo_id],
-        )?;
-        if updated == 0 {
-            return Err(InventoryError::NotFound(vtxo_id.to_string()));
-        }
-        Ok(())
-    }
-
-    pub fn active_reserve_msat(&self) -> Result<u64, InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        let total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_msat), 0) FROM vtxo_inventory WHERE status = 'active'",
+    /// Total msat in active VTXOs not yet promised to outstanding tokens.
+    pub fn free_reserve_msat(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let free: i64 = conn.query_row(
+            "SELECT COALESCE((SELECT SUM(amount_msat) FROM vtxo_inventory WHERE status = 'active'), 0)
+                  - COALESCE((SELECT SUM(m.amount_msat) FROM token_vtxo_map m
+                              JOIN vtxo_inventory v ON v.id = m.vtxo_id
+                              WHERE v.status = 'active'), 0)",
             [],
             |row| row.get(0),
         )?;
-        Ok(total as u64)
+        Ok(free.max(0) as u64)
     }
 
-    pub fn get_vtxo_for_token(&self, token_id: &str) -> Result<InventoryVtxo, InventoryError> {
-        let conn = self.conn.lock().expect("inventory mutex");
-        let mut stmt = conn.prepare(
-            "SELECT v.id, v.amount_msat, v.status, v.expires_at, v.branch_tx_hex, v.leaf_tx_hex
-             FROM token_vtxo_map t
-             JOIN vtxo_inventory v ON v.id = t.vtxo_id
-             WHERE t.token_id = ?1",
+    /// Earliest expiry height among active VTXOs (for /ark/refresh/status).
+    pub fn next_expiry_height(&self) -> Result<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let h: Option<i64> = conn.query_row(
+            "SELECT MIN(expires_at) FROM vtxo_inventory WHERE status = 'active'",
+            [],
+            |row| row.get(0),
         )?;
-        let mut rows = stmt.query(params![token_id])?;
-        let Some(row) = rows.next()? else {
-            return Err(InventoryError::NotFound(token_id.to_string()));
-        };
-        Ok(InventoryVtxo {
-            id: row.get(0)?,
-            amount_msat: row.get(1)?,
-            status: VtxoStatus::from_str(&row.get::<_, String>(2)?)?,
-            expires_at: parse_ts(&row.get::<_, String>(3)?),
-            branch_tx_hex: row.get(4)?,
-            leaf_tx_hex: row.get(5)?,
-        })
+        Ok(h.map(|v| v as u64))
     }
-}
-
-fn parse_ts(value: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ark_client::MockArkClient;
-    use uuid::Uuid;
 
-    fn sample_vtxo(amount: u64) -> Vtxo {
-        MockArkClient::new("02abc", 800_000)
-            .make_vtxo(amount)
+    fn vtxo(id: &str, amount_msat: u64, expiry: u64) -> Vtxo {
+        Vtxo {
+            id: id.to_string(),
+            amount_msat,
+            expiry,
+            branch_tx: format!("{id}-branch"),
+            leaf_tx: format!("{id}-leaf"),
+            asp_pubkey: "02ab".to_string(),
+        }
+    }
+
+    fn inv_with(vtxos: &[Vtxo]) -> VtxoInventory {
+        let inv = VtxoInventory::open_in_memory().unwrap();
+        for v in vtxos {
+            inv.insert_vtxo(v).unwrap();
+        }
+        inv
     }
 
     #[test]
-    fn allocate_release_and_refresh_queue() {
-        let inv = VtxoInventory::in_memory(10).unwrap();
-        let expires = Utc::now() + chrono::Duration::hours(1);
-        let vtxo = sample_vtxo(100_000);
-        inv.insert_vtxo(&vtxo, expires).unwrap();
+    fn allocate_picks_vtxo_with_capacity_and_tracks_free_reserve() {
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000), vtxo("b", 5_000_000, 900_000)]);
+        assert_eq!(inv.free_reserve_msat().unwrap(), 6_000_000);
 
-        let allocated = inv.allocate_vtxo_for_tokens(50_000).unwrap();
-        assert_eq!(allocated.id, vtxo.id);
+        // 2M only fits in "b".
+        let chosen = inv.allocate_vtxo_for_tokens("tok1", 2_000_000).unwrap();
+        assert_eq!(chosen, "b");
+        assert_eq!(inv.free_reserve_msat().unwrap(), 4_000_000);
 
-        let token_id = Uuid::new_v4().to_string();
-        inv.map_token_to_vtxo(&token_id, &vtxo.id, 50_000, expires).unwrap();
-        inv.release_vtxo_mapping(&token_id).unwrap();
+        // "b" still has the most free capacity (3M vs 1M).
+        let chosen = inv.allocate_vtxo_for_tokens("tok2", 3_000_000).unwrap();
+        assert_eq!(chosen, "b");
 
-        let near_expiry = Utc::now() + chrono::Duration::minutes(5);
-        let refresh_candidate = sample_vtxo(200_000);
-        inv.insert_vtxo(&refresh_candidate, near_expiry).unwrap();
-        let queue = inv.get_refresh_queue().unwrap();
-        assert!(!queue.is_empty());
+        // Now only "a" (1M free) can take a small allocation.
+        let chosen = inv.allocate_vtxo_for_tokens("tok3", 500_000).unwrap();
+        assert_eq!(chosen, "a");
+
+        // Nothing can take 2M anymore.
+        let err = inv.allocate_vtxo_for_tokens("tok4", 2_000_000).unwrap_err();
+        assert!(matches!(err, MintError::InsufficientLiquidity { .. }));
+    }
+
+    #[test]
+    fn allocate_fails_on_empty_inventory() {
+        let inv = inv_with(&[]);
+        let err = inv.allocate_vtxo_for_tokens("tok", 1).unwrap_err();
+        assert!(matches!(err, MintError::InsufficientLiquidity { .. }));
+    }
+
+    #[test]
+    fn duplicate_token_id_rejected() {
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000)]);
+        inv.allocate_vtxo_for_tokens("tok", 100).unwrap();
+        assert!(inv.allocate_vtxo_for_tokens("tok", 100).is_err());
+    }
+
+    #[test]
+    fn release_restores_capacity_and_is_idempotent_failure() {
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000)]);
+        inv.allocate_vtxo_for_tokens("tok", 800_000).unwrap();
+        assert_eq!(inv.free_reserve_msat().unwrap(), 200_000);
+
+        let mapping = inv.release_vtxo_mapping("tok").unwrap();
+        assert_eq!(mapping.vtxo_id, "a");
+        assert_eq!(mapping.amount_msat, 800_000);
+        assert_eq!(inv.free_reserve_msat().unwrap(), 1_000_000);
+
+        let err = inv.release_vtxo_mapping("tok").unwrap_err();
+        assert!(matches!(err, MintError::MappingNotFound(_)));
+    }
+
+    #[test]
+    fn refresh_queue_orders_by_expiry_and_respects_threshold() {
+        let inv = inv_with(&[
+            vtxo("soon", 1_000, 850_100),
+            vtxo("sooner", 1_000, 850_050),
+            vtxo("later", 1_000, 880_000),
+        ]);
+        let queue = inv.get_refresh_queue(850_000, 144).unwrap();
+        let ids: Vec<_> = queue.iter().map(|r| r.vtxo.id.as_str()).collect();
+        assert_eq!(ids, vec!["sooner", "soon"]);
+
+        // Spent VTXOs never appear in the queue.
+        inv.set_status("sooner", VtxoStatus::Spent).unwrap();
+        let queue = inv.get_refresh_queue(850_000, 144).unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].vtxo.id, "soon");
+    }
+
+    #[test]
+    fn replace_refreshed_repoints_mappings() {
+        let inv = inv_with(&[vtxo("old", 1_000_000, 850_010)]);
+        inv.allocate_vtxo_for_tokens("tok", 600_000).unwrap();
+
+        let fresh = vtxo("new", 1_000_000, 876_000);
+        inv.replace_refreshed("old", &fresh).unwrap();
+
+        let mapping = inv.get_mapping("tok").unwrap().unwrap();
+        assert_eq!(mapping.vtxo_id, "new");
+        assert_eq!(mapping.expires_at, 876_000);
+
+        let old = inv.get_vtxo("old").unwrap().unwrap();
+        assert_eq!(old.status, VtxoStatus::Spent);
+        let new = inv.get_vtxo("new").unwrap().unwrap();
+        assert_eq!(new.status, VtxoStatus::Active);
+
+        // Free reserve unchanged by a refresh (1M active - 600k allocated).
+        assert_eq!(inv.free_reserve_msat().unwrap(), 400_000);
+    }
+
+    #[test]
+    fn status_check_constraint_enforced() {
+        let inv = inv_with(&[vtxo("a", 1, 1)]);
+        let conn = inv.conn.lock().unwrap();
+        let res = conn.execute(
+            "UPDATE vtxo_inventory SET status = 'bogus' WHERE id = 'a'",
+            [],
+        );
+        assert!(res.is_err());
     }
 }

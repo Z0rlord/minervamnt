@@ -2,6 +2,8 @@
 
 Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead of Lightning liquidity. Public URL: [https://minervamnt.xyz](https://minervamnt.xyz).
 
+> **Canonical repo.** This directory (`minervamnt`) is the GitHub source of truth at [github.com/Z0rlord/minervamnt](https://github.com/Z0rlord/minervamnt). A parallel scaffold at `~/Projects/minerva-mint` was merged here and is now **deprecated/spare** — do not develop against it.
+
 ## Architecture
 
 ```
@@ -25,7 +27,8 @@ Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead 
 - **Rust** + **axum** HTTP server
 - **SQLite** VTXO inventory (`rusqlite`)
 - **Mock Ark client** (trait boundary ready for `arkade` / `second`)
-- **CDK**: not wired yet — NUT request/response shapes are stubbed; integrate `cdk` 0.16.x when ASP client is ready
+- **NUT wire types** (NUT-03/04/05/06), `MintError` HTTP mapping, mock BDHKE blind signatures
+- **CDK**: not wired yet — integrate `cdk` 0.16.x when ASP client is ready
 
 ## Quick start
 
@@ -45,17 +48,16 @@ Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`)
 
 ## API
 
-### Cashu NUT endpoints (stubs)
+### Cashu NUT endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/v1/info` | Mint info and supported NUTs |
-| POST | `/v1/mint/quote/bolt11` | Request mint quote |
-| GET | `/v1/mint/quote/bolt11/{quote_id}` | Quote state |
-| POST | `/v1/mint/bolt11` | Issue tokens |
-| POST | `/v1/melt/quote/bolt11` | Melt quote |
-| POST | `/v1/melt/bolt11` | Redeem tokens |
-| POST | `/v1/swap` | Swap tokens |
+| Method | Path | NUT | Description |
+|--------|------|-----|-------------|
+| GET | `/v1/info` | NUT-06 | Mint info and supported NUTs |
+| POST | `/v1/mint/quote/bolt11` | NUT-04 | Request mint quote |
+| POST | `/v1/mint/bolt11` | NUT-04 | Issue blinded tokens |
+| POST | `/v1/melt/quote/bolt11` | NUT-05 | Melt quote |
+| POST | `/v1/melt/bolt11` | NUT-05 | Redeem tokens |
+| POST | `/v1/swap` | NUT-03 | Swap tokens |
 
 ### Ark extensions
 
@@ -69,7 +71,7 @@ Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Reserve, refresh queue, Bitcoin sync probe, RPC/ASP config |
+| GET | `/health` | Ark connectivity, reserve, refresh queue, Bitcoin sync probe |
 
 ## Configuration
 
