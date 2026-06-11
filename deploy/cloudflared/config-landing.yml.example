@@ -1,0 +1,10 @@
+# Landing-page mode: mint API disabled, static page on port 8080.
+# Copy to /etc/cloudflared/config.yml and restart cloudflared.
+
+tunnel: 4b000692-9937-4185-a25a-c0ffe192056a
+credentials-file: /etc/cloudflared/4b000692-9937-4185-a25a-c0ffe192056a.json
+
+ingress:
+  - hostname: minervamnt.xyz
+    service: http://localhost:8080
+  - service: http_status:404

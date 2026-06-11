@@ -2,7 +2,7 @@
 
 Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead of Lightning liquidity. Public URL: [https://minervamnt.xyz](https://minervamnt.xyz).
 
-> **Canonical repo.** This directory (`minervamnt`) is the GitHub source of truth at [github.com/Z0rlord/minervamnt](https://github.com/Z0rlord/minervamnt). A parallel scaffold at `~/Projects/minerva-mint` was merged here and is now **deprecated/spare** — do not develop against it.
+> **Current mode: landing page.** The mint API is temporarily disabled. `minervamnt.xyz` serves a static “coming soon” page. See [Landing page mode](#landing-page-mode) to switch modes.
 
 ## Architecture
 
@@ -13,13 +13,11 @@ Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead 
 └─────────────┘     │  - VTXO inventory│     └─────────────┘
                     │  - Refresh sched.│
                     └────────┬─────────┘
-                             │ Tailscale RPC (100.64.0.0/10)
+                             │
                     ┌────────┴────────┐
                     │  Bitcoin Core   │
-                    │  pi5 / TS only  │
+                    │  (Pi 5 / TS)    │
                     └─────────────────┘
-                             ▲
-                    Cloudflare Tunnel (public HTTPS only)
 ```
 
 ## Stack
@@ -27,15 +25,13 @@ Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead 
 - **Rust** + **axum** HTTP server
 - **SQLite** VTXO inventory (`rusqlite`)
 - **Mock Ark client** (trait boundary ready for `arkade` / `second`)
-- **NUT wire types** (NUT-03/04/05/06), `MintError` HTTP mapping, mock BDHKE blind signatures
-- **CDK**: not wired yet — integrate `cdk` 0.16.x when ASP client is ready
+- **CDK**: not wired yet — NUT request/response shapes are stubbed; integrate `cdk` 0.16.x when ASP client is ready
 
 ## Quick start
 
 ```bash
 cp .env.example .env
-# Set BITCOIN_RPC_PASSWORD from Pi:
-# ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 'sudo grep rpcpassword /etc/bitcoin/rpc-credentials'
+# Set BITCOIN_RPC_PASSWORD from Pi: sudo cat /etc/bitcoin/rpc-credentials
 
 cargo build
 cargo test
@@ -44,20 +40,19 @@ cargo run
 
 Server listens on `0.0.0.0:3338` by default.
 
-Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`). Override via `.env` if needed.
-
 ## API
 
-### Cashu NUT endpoints
+### Cashu NUT endpoints (stubs)
 
-| Method | Path | NUT | Description |
-|--------|------|-----|-------------|
-| GET | `/v1/info` | NUT-06 | Mint info and supported NUTs |
-| POST | `/v1/mint/quote/bolt11` | NUT-04 | Request mint quote |
-| POST | `/v1/mint/bolt11` | NUT-04 | Issue blinded tokens |
-| POST | `/v1/melt/quote/bolt11` | NUT-05 | Melt quote |
-| POST | `/v1/melt/bolt11` | NUT-05 | Redeem tokens |
-| POST | `/v1/swap` | NUT-03 | Swap tokens |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/info` | Mint info and supported NUTs |
+| POST | `/v1/mint/quote/bolt11` | Request mint quote |
+| GET | `/v1/mint/quote/bolt11/{quote_id}` | Quote state |
+| POST | `/v1/mint/bolt11` | Issue tokens |
+| POST | `/v1/melt/quote/bolt11` | Melt quote |
+| POST | `/v1/melt/bolt11` | Redeem tokens |
+| POST | `/v1/swap` | Swap tokens |
 
 ### Ark extensions
 
@@ -71,7 +66,7 @@ Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`)
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Ark connectivity, reserve, refresh queue, Bitcoin sync probe |
+| GET | `/health` | Reserve, refresh queue, RPC/ASP config; includes `bitcoin` sync info when RPC credentials are set |
 
 ## Configuration
 
@@ -81,100 +76,80 @@ Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`)
 |----------|---------|
 | `BITCOIN_RPC_URL` | Pi 5 Bitcoin RPC over Tailscale (`http://100.75.188.125:8332`) |
 | `BITCOIN_RPC_USER` | RPC username (`minerva`) |
-| `BITCOIN_RPC_PASSWORD` | RPC password (from Pi credentials file) |
+| `BITCOIN_RPC_PASSWORD` | RPC password — copy from Pi, never commit |
 | `MINERVA_CONFIG` | Path to config file (default `config.toml`) |
 | `RUST_LOG` | Log filter |
 
+Default `config.toml` points at the Pi Tailscale IP. Override with `.env` for local dev.
+
 ## Deployment
 
-### Raspberry Pi 5 — hardening checklist
+### Bitcoin RPC (Raspberry Pi 5 — pi5)
 
-Production Bitcoin node host: **pi5** (`100.75.188.125` on Tailscale, `pi5.tailbcc07.ts.net`).
+Bitcoin Core 31.0 runs on **pi5** with datadir `/mnt/btcdata/bitcoin` (full node, `txindex=1`).
 
-| Step | Status / command |
-|------|------------------|
-| Tailscale on boot | `systemctl is-enabled tailscaled` |
-| SSH key-only | `deploy/pi/harden.sh` → `/etc/ssh/sshd_config.d/99-hardening.conf` |
-| UFW default deny | SSH + RPC **only** on `tailscale0`; no public 8333/8332 |
-| fail2ban sshd | bantime 1h, maxretry 5 |
-| unattended-upgrades | daily security patches |
-| sysctl hardening | `/etc/sysctl.d/99-hardening.conf` |
-| cloudflared binary | installed; tunnel auth is manual (below) |
-| 1TB SSD | `/mnt/btcdata` ext4, Bitcoin datadir `/mnt/btcdata/bitcoin` |
-| Bitcoin Core 31.0 | `deploy/pi/install-bitcoind.sh` (idempotent) |
+| Item | Value |
+|------|-------|
+| Tailscale IP | `100.75.188.125` |
+| RPC URL | `http://100.75.188.125:8332` |
+| RPC user | `minerva` |
+| Password | `/etc/bitcoin/rpc-credentials` on Pi (root-only) |
+| SSH | `ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125` |
 
-Re-run scripts on the Pi (after `git clone` or `scp`):
+RPC is bound to the Tailscale interface; UFW allows port `8332` on `tailscale0` only.
+
+**Initial block download takes days.** Check sync from any Tailscale peer:
 
 ```bash
-chmod +x deploy/pi/*.sh
-./deploy/pi/harden.sh          # safe to re-run
-./deploy/pi/install-bitcoind.sh # requires mounted SSD with 800GB+ free
+curl -s --user minerva:'<password>' \
+  --data-binary '{"jsonrpc":"1.0","id":"sync","method":"getblockchaininfo","params":[]}' \
+  -H 'content-type: text/plain;' \
+  http://100.75.188.125:8332/ \
+  | jq '.result | {blocks, headers, verificationprogress, initialblockdownload}'
 ```
 
-Operational reference: `deploy/pi/README.md`.
+When `.env` has RPC credentials, `GET /health` includes a `bitcoin` object with the same fields.
 
-**SSH:** `ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125`
-
-### Tailscale RPC wiring (mint → Pi)
-
-1. Mint host (Mac, VPS, or same Pi) joins the same tailnet.
-2. `.env`: `BITCOIN_RPC_URL=http://100.75.188.125:8332`, user `minerva`, password from Pi:
-   ```bash
-   ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 \
-     'sudo grep rpcpassword /etc/bitcoin/rpc-credentials'
-   ```
-3. RPC is bound to the Pi Tailscale IP; `rpcallowip=100.64.0.0/10` — **never** expose 8332 on the public internet.
-4. Check sync from any Tailscale peer:
-   ```bash
-   curl -s --user minerva:<password> \
-     --data-binary '{"jsonrpc":"1.0","id":"sync","method":"getblockchaininfo","params":[]}' \
-     -H 'content-type: text/plain;' \
-     http://100.75.188.125:8332 \
-     | jq '.result | {chain, blocks, headers, verificationprogress, initialblockdownload}'
-   ```
-5. `/health` reports chain, block height, and sync state when RPC credentials are in `.env`.
-
-**Initial block download (IBD) takes days** on a Pi. The mint can run during sync, but Bitcoin-backed features need `initialblockdownload: false` and `verificationprogress` ≈ 1.
-
-### ZeroTier (optional)
-
-Tailscale is the primary overlay. ZeroTier can run **alongside** Tailscale for an alternate mesh path; do not expose Bitcoin RPC on either interface to the public WAN. If you use ZeroTier, add UFW rules only for the ZeroTier interface (`zt*`) mirroring the `tailscale0` rules, or route RPC exclusively over one overlay to reduce attack surface.
+See [`deploy/pi/README.md`](deploy/pi/README.md) for the full Pi reference.
 
 ### Cloudflare Tunnel → minervamnt.xyz
 
-Public ingress for the mint HTTP API only (port 3338). Bitcoin RPC stays off the tunnel.
+`cloudflared` is installed on pi5. Finish tunnel setup (one-time Cloudflare login required):
 
-1. On the mint host, install `cloudflared` (Pi already has the binary).
-2. Authenticate (one-time, browser):
-   ```bash
-   cloudflared tunnel login
-   ```
-3. Create tunnel and DNS route:
-   ```bash
-   cloudflared tunnel create minervamnt
-   cloudflared tunnel route dns minervamnt minervamnt.xyz
-   ```
-4. Copy and edit config:
-   ```bash
-   sudo mkdir -p /etc/cloudflared
-   sudo cp deploy/cloudflared/config.yml.example /etc/cloudflared/config.yml
-   # Set <TUNNEL_ID> and credentials path
-   sudo cp ~/.cloudflared/<TUNNEL_ID>.json /etc/cloudflared/
-   ```
-5. Enable systemd (adjust user/paths):
-   ```bash
-   sudo cp deploy/systemd/cloudflared.service.example /etc/systemd/system/cloudflared.service
-   sudo systemctl enable --now cloudflared
-   ```
-6. Ingress: `https://minervamnt.xyz` → `http://localhost:3338` (see `deploy/cloudflared/config.yml.example`).
+1. **Login:** `cloudflared tunnel login` (opens browser for your Cloudflare account)
+2. **Create tunnel:** `cloudflared tunnel create minervamnt`
+3. **DNS route:** `cloudflared tunnel route dns minervamnt minervamnt.xyz`
+4. **Config:** copy [`deploy/cloudflared/config.yml.example`](deploy/cloudflared/config.yml.example) to `~/.cloudflared/config.yml` and replace `<TUNNEL_UUID>`
+5. **systemd:** copy [`deploy/systemd/cloudflared.service.example`](deploy/systemd/cloudflared.service.example) to `/etc/systemd/system/cloudflared.service`, then `sudo systemctl enable --now cloudflared`
 
-### Minerva Mint systemd service
+Ingress (mint mode): `https://minervamnt.xyz` → `http://localhost:3338`.
+
+Ingress (landing mode): `https://minervamnt.xyz` → `http://localhost:8080`.
+
+### Landing page mode
+
+When the mint API should be offline, use the static landing page instead:
 
 ```bash
-sudo useradd --system --create-home minerva || true
-sudo mkdir -p /opt/minervamnt/data
-# build release binary, copy .env from .env.example
+# On pi5 (after git pull)
+bash deploy/pi/enable-landing-mode.sh
+```
+
+This stops `minerva-mint`, starts `minervamnt-landing` (Python `http.server` on `127.0.0.1:8080`), and points cloudflared at port 8080.
+
+To restore the mint API:
+
+```bash
+bash deploy/pi/enable-mint-mode.sh
+```
+
+### Minerva Mint systemd
+
+Build release binary on the host, then:
+
+```bash
 sudo cp deploy/systemd/minerva-mint.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now minerva-mint
 ```
 

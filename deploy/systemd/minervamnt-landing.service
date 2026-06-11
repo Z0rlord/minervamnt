@@ -1,0 +1,17 @@
+[Unit]
+Description=Minerva Mint static landing page
+Documentation=https://github.com/Z0rlord/minervamnt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/minervamnt/landing
+ExecStart=/usr/bin/python3 -m http.server 8080 --bind 127.0.0.1
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
