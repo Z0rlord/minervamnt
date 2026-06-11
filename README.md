@@ -121,8 +121,18 @@ Operational reference: `deploy/pi/README.md`.
    ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 \
      'sudo grep rpcpassword /etc/bitcoin/rpc-credentials'
    ```
-3. RPC is bound to `127.0.0.1` and the Pi Tailscale IP; `rpcallowip=100.64.0.0/10` — **never** expose 8332 on the public internet.
-4. `/health` reports chain, block height, and sync state via `getblockchaininfo`.
+3. RPC is bound to the Pi Tailscale IP; `rpcallowip=100.64.0.0/10` — **never** expose 8332 on the public internet.
+4. Check sync from any Tailscale peer:
+   ```bash
+   curl -s --user minerva:<password> \
+     --data-binary '{"jsonrpc":"1.0","id":"sync","method":"getblockchaininfo","params":[]}' \
+     -H 'content-type: text/plain;' \
+     http://100.75.188.125:8332 \
+     | jq '.result | {chain, blocks, headers, verificationprogress, initialblockdownload}'
+   ```
+5. `/health` reports chain, block height, and sync state when RPC credentials are in `.env`.
+
+**Initial block download (IBD) takes days** on a Pi. The mint can run during sync, but Bitcoin-backed features need `initialblockdownload: false` and `verificationprogress` ≈ 1.
 
 ### ZeroTier (optional)
 
