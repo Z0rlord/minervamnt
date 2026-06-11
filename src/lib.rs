@@ -1,5 +1,6 @@
 pub mod api;
 pub mod ark_client;
+pub mod bitcoin;
 pub mod config;
 pub mod health;
 pub mod mint_backend;

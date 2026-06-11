@@ -11,11 +11,13 @@ Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead 
 └─────────────┘     │  - VTXO inventory│     └─────────────┘
                     │  - Refresh sched.│
                     └────────┬─────────┘
-                             │
+                             │ Tailscale RPC (100.64.0.0/10)
                     ┌────────┴────────┐
                     │  Bitcoin Core   │
-                    │  (Pi 5 / TS)    │
+                    │  pi5 / TS only  │
                     └─────────────────┘
+                             ▲
+                    Cloudflare Tunnel (public HTTPS only)
 ```
 
 ## Stack
@@ -29,7 +31,8 @@ Ark-backed Cashu mint where issued ecash tokens are backed by Ark VTXOs instead 
 
 ```bash
 cp .env.example .env
-# Edit BITCOIN_RPC_URL to your Pi 5 Tailscale IP
+# Set BITCOIN_RPC_PASSWORD from Pi:
+# ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 'sudo grep rpcpassword /etc/bitcoin/rpc-credentials'
 
 cargo build
 cargo test
@@ -37,6 +40,8 @@ cargo run
 ```
 
 Server listens on `0.0.0.0:3338` by default.
+
+Default Bitcoin RPC points at the Pi 5 Tailscale address (`100.75.188.125:8332`). Override via `.env` if needed.
 
 ## API
 
@@ -64,7 +69,7 @@ Server listens on `0.0.0.0:3338` by default.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Reserve, refresh queue, RPC/ASP config |
+| GET | `/health` | Reserve, refresh queue, Bitcoin sync probe, RPC/ASP config |
 
 ## Configuration
 
@@ -72,24 +77,94 @@ Server listens on `0.0.0.0:3338` by default.
 
 | Variable | Purpose |
 |----------|---------|
-| `BITCOIN_RPC_URL` | Pi 5 Bitcoin RPC over Tailscale, e.g. `http://100.x.x.x:8332` |
-| `BITCOIN_RPC_USER` | RPC username |
-| `BITCOIN_RPC_PASSWORD` | RPC password |
+| `BITCOIN_RPC_URL` | Pi 5 Bitcoin RPC over Tailscale (`http://100.75.188.125:8332`) |
+| `BITCOIN_RPC_USER` | RPC username (`minerva`) |
+| `BITCOIN_RPC_PASSWORD` | RPC password (from Pi credentials file) |
 | `MINERVA_CONFIG` | Path to config file (default `config.toml`) |
 | `RUST_LOG` | Log filter |
 
 ## Deployment
 
+### Raspberry Pi 5 — hardening checklist
+
+Production Bitcoin node host: **pi5** (`100.75.188.125` on Tailscale, `pi5.tailbcc07.ts.net`).
+
+| Step | Status / command |
+|------|------------------|
+| Tailscale on boot | `systemctl is-enabled tailscaled` |
+| SSH key-only | `deploy/pi/harden.sh` → `/etc/ssh/sshd_config.d/99-hardening.conf` |
+| UFW default deny | SSH + RPC **only** on `tailscale0`; no public 8333/8332 |
+| fail2ban sshd | bantime 1h, maxretry 5 |
+| unattended-upgrades | daily security patches |
+| sysctl hardening | `/etc/sysctl.d/99-hardening.conf` |
+| cloudflared binary | installed; tunnel auth is manual (below) |
+| 1TB SSD | `/mnt/btcdata` ext4, Bitcoin datadir `/mnt/btcdata/bitcoin` |
+| Bitcoin Core 31.0 | `deploy/pi/install-bitcoind.sh` (idempotent) |
+
+Re-run scripts on the Pi (after `git clone` or `scp`):
+
+```bash
+chmod +x deploy/pi/*.sh
+./deploy/pi/harden.sh          # safe to re-run
+./deploy/pi/install-bitcoind.sh # requires mounted SSD with 800GB+ free
+```
+
+Operational reference: `deploy/pi/README.md`.
+
+**SSH:** `ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125`
+
+### Tailscale RPC wiring (mint → Pi)
+
+1. Mint host (Mac, VPS, or same Pi) joins the same tailnet.
+2. `.env`: `BITCOIN_RPC_URL=http://100.75.188.125:8332`, user `minerva`, password from Pi:
+   ```bash
+   ssh -i ~/.ssh/raspi_key ubuntu@100.75.188.125 \
+     'sudo grep rpcpassword /etc/bitcoin/rpc-credentials'
+   ```
+3. RPC is bound to `127.0.0.1` and the Pi Tailscale IP; `rpcallowip=100.64.0.0/10` — **never** expose 8332 on the public internet.
+4. `/health` reports chain, block height, and sync state via `getblockchaininfo`.
+
+### ZeroTier (optional)
+
+Tailscale is the primary overlay. ZeroTier can run **alongside** Tailscale for an alternate mesh path; do not expose Bitcoin RPC on either interface to the public WAN. If you use ZeroTier, add UFW rules only for the ZeroTier interface (`zt*`) mirroring the `tailscale0` rules, or route RPC exclusively over one overlay to reduce attack surface.
+
 ### Cloudflare Tunnel → minervamnt.xyz
 
-1. Install `cloudflared` on the mint host.
-2. `cloudflared tunnel create minervamnt`
-3. Route DNS: `minervamnt.xyz` → tunnel.
-4. Ingress: `https://minervamnt.xyz` → `http://localhost:3338`.
+Public ingress for the mint HTTP API only (port 3338). Bitcoin RPC stays off the tunnel.
 
-### Bitcoin RPC (Raspberry Pi 5)
+1. On the mint host, install `cloudflared` (Pi already has the binary).
+2. Authenticate (one-time, browser):
+   ```bash
+   cloudflared tunnel login
+   ```
+3. Create tunnel and DNS route:
+   ```bash
+   cloudflared tunnel create minervamnt
+   cloudflared tunnel route dns minervamnt minervamnt.xyz
+   ```
+4. Copy and edit config:
+   ```bash
+   sudo mkdir -p /etc/cloudflared
+   sudo cp deploy/cloudflared/config.yml.example /etc/cloudflared/config.yml
+   # Set <TUNNEL_ID> and credentials path
+   sudo cp ~/.cloudflared/<TUNNEL_ID>.json /etc/cloudflared/
+   ```
+5. Enable systemd (adjust user/paths):
+   ```bash
+   sudo cp deploy/systemd/cloudflared.service.example /etc/systemd/system/cloudflared.service
+   sudo systemctl enable --now cloudflared
+   ```
+6. Ingress: `https://minervamnt.xyz` → `http://localhost:3338` (see `deploy/cloudflared/config.yml.example`).
 
-Another node on your Tailscale network runs Bitcoin Core. Bind RPC to the Tailscale interface only (`rpcbind=100.x.x.x`, `rpcallowip=100.64.0.0/10`). Set credentials in `.env` — never commit secrets.
+### Minerva Mint systemd service
+
+```bash
+sudo useradd --system --create-home minerva || true
+sudo mkdir -p /opt/minervamnt/data
+# build release binary, copy .env from .env.example
+sudo cp deploy/systemd/minerva-mint.service /etc/systemd/system/
+sudo systemctl enable --now minerva-mint
+```
 
 ## Open questions
 
