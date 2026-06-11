@@ -1,0 +1,14 @@
+# Copy to `.envrc` for local direnv + Doppler auto-load (never commit `.envrc`).
+# Requires: direnv, doppler login, and `doppler.yaml` in this directory.
+
+if ! command -v doppler >/dev/null 2>&1; then
+  return 0
+fi
+
+if [[ ! -f doppler.yaml ]]; then
+  return 0
+fi
+
+set -a
+source <(doppler secrets download --no-file --format env-no-quotes 2>/dev/null) || true
+set +a
