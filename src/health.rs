@@ -1,9 +1,7 @@
-use crate::ark_client::ArkClient;
 use crate::bitcoin::{get_blockchain_info, BlockchainInfo};
 use crate::config::AppConfig;
 use crate::mint_backend::MintBackend;
 use serde::Serialize;
-use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub struct HealthStatus {
@@ -20,12 +18,13 @@ pub struct HealthStatus {
     pub ark_server_url: String,
 }
 
-pub async fn collect_health<C: ArkClient>(
-    config: &AppConfig,
-    backend: &MintBackend<C>,
-) -> HealthStatus {
-    let active_reserve_msat = backend.active_reserve_msat().unwrap_or(0);
-    let pending_refresh_count = backend.refresh_status().map(|q| q.len()).unwrap_or(0);
+pub async fn collect_health(config: &AppConfig, backend: &MintBackend) -> HealthStatus {
+    let active_reserve_msat = backend.inventory().free_reserve_msat().unwrap_or(0);
+    let pending_refresh_count = backend
+        .refresh_status()
+        .await
+        .map(|r| r.pending_refreshes)
+        .unwrap_or(0);
     let bitcoin = probe_bitcoin(&config.bitcoin).await;
 
     let mut status = if pending_refresh_count == 0 {
@@ -81,9 +80,4 @@ async fn probe_bitcoin(config: &crate::config::BitcoinConfig) -> BitcoinProbe {
 
 fn is_synced(info: &BlockchainInfo) -> bool {
     !info.initialblockdownload && info.verificationprogress >= 0.999
-}
-
-pub struct HealthState<C: ArkClient> {
-    pub config: Arc<AppConfig>,
-    pub backend: Arc<MintBackend<C>>,
 }

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use minerva_mint::api::{self, build_state};
+use minerva_mint::api::router;
 use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::vtxo_inventory::VtxoInventory;
@@ -8,23 +8,18 @@ use minerva_mint::AppConfig;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_config() -> AppConfig {
-    AppConfig::load("config.toml").expect("config")
+fn test_backend() -> Arc<MintBackend> {
+    let config = AppConfig::load("config.toml").expect("config");
+    let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+    Arc::new(MintBackend::new(
+        config,
+        ark,
+        VtxoInventory::open_in_memory().unwrap(),
+    ))
 }
 
 fn test_app() -> axum::Router {
-    let config = test_config();
-    let ark = Arc::new(MockArkClient::new(
-        config.ark.server_pubkey.clone(),
-        config.ark.default_vtxo_expiry,
-    ));
-    let inventory = Arc::new(VtxoInventory::in_memory(10).unwrap());
-    let backend = Arc::new(MintBackend::new(
-        ark,
-        inventory,
-        config.liquidity.clone(),
-    ));
-    api::router(build_state(config, backend))
+    router(test_backend())
 }
 
 #[tokio::test]
