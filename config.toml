@@ -1,0 +1,29 @@
+[mint]
+name = "Minerva Mint"
+description = "Cashu mint backed by Ark VTXOs"
+url = "https://minervamnt.xyz"
+
+[ark]
+server_url = "https://asp.example.com"
+server_pubkey = "02placeholderpubkey0000000000000000000000000000000000000000000000000000"
+refresh_threshold_blocks = 144
+default_vtxo_expiry = 25920
+
+[bitcoin]
+# Override with BITCOIN_RPC_URL env (Pi Tailscale IP)
+rpc_url = "http://127.0.0.1:8332"
+
+[liquidity]
+min_vtxo_reserve_msat = 1_000_000_000
+max_single_vtxo_msat = 10_000_000_000
+auto_board_threshold = 0.5
+
+[database]
+path = "data/minerva.sqlite"
+
+[server]
+host = "0.0.0.0"
+port = 3338
+
+[scheduler]
+refresh_interval_secs = 60
