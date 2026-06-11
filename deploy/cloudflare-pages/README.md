@@ -17,9 +17,8 @@ Static landing page for [minervamnt.xyz](https://minervamnt.xyz). Served from Cl
 Requires Node.js / `npx` (or portable Node in `/tmp`).
 
 ```bash
-# From repo root — inject token from Doppler (dojopop / prd_zorie)
-doppler run --project dojopop --config prd_zorie -- bash -c '
-  export CLOUDFLARE_ACCOUNT_ID=dfc6e38d5b254f0f8ffac8a0e554112a
+# From repo root — inject token from Doppler (project minervamnt; see doppler.yaml)
+doppler run -- bash -c '
   npx wrangler@4 pages deploy landing \
     --project-name=minervamnt \
     --branch=main \
@@ -30,7 +29,7 @@ doppler run --project dojopop --config prd_zorie -- bash -c '
 First-time project creation (if missing):
 
 ```bash
-doppler run --project dojopop --config prd_zorie -- bash -c '
+doppler run --project minervamnt --config dev -- bash -c '
   curl -sS -X POST \
     -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
     -H "Content-Type: application/json" \
@@ -59,7 +58,7 @@ Custom domains are attached to the Pages project via API or dashboard. DNS for `
 Update DNS with the DNS-scoped token (`CLOUDFLARE_DNS_TOKEN` in Doppler):
 
 ```bash
-doppler run --project dojopop --config prd_zorie -- bash -c '
+doppler run --project minervamnt --config dev -- bash -c '
   API="https://api.cloudflare.com/client/v4"
   AUTH="Authorization: Bearer $CLOUDFLARE_DNS_TOKEN"
   ZONE="$CLOUDFLARE_ZONE_ID_MINERVAMNT"
@@ -74,10 +73,10 @@ doppler run --project dojopop --config prd_zorie -- bash -c '
 Attach domains to Pages (uses `CLOUDFLARE_API_TOKEN`):
 
 ```bash
-doppler run --project dojopop --config prd_zorie -- bash -c '
+doppler run --project minervamnt --config dev -- bash -c '
   API="https://api.cloudflare.com/client/v4"
   AUTH="Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-  ACCOUNT=dfc6e38d5b254f0f8ffac8a0e554112a
+  ACCOUNT="$CLOUDFLARE_ACCOUNT_ID"
 
   for host in minervamnt.xyz www.minervamnt.xyz; do
     curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" \

@@ -126,10 +126,8 @@ See [`deploy/pi/README.md`](deploy/pi/README.md) for the full Pi reference.
 
 ```bash
 # Manual deploy from Mac (Doppler injects CLOUDFLARE_API_TOKEN)
-doppler run --project dojopop --config prd_zorie -- bash -c '
-  export CLOUDFLARE_ACCOUNT_ID=dfc6e38d5b254f0f8ffac8a0e554112a
-  npx wrangler@4 pages deploy landing --project-name=minervamnt --branch=main
-'
+doppler setup   # once — selects project minervamnt / config dev (see doppler.yaml)
+doppler run -- npx wrangler@4 pages deploy landing --project-name=minervamnt --branch=main
 ```
 
 Pushes to `main` that touch `landing/**` also deploy via GitHub Actions (requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repo secrets).
@@ -173,4 +171,20 @@ sudo systemctl enable --now minerva-mint
 
 ## License
 
-MIT
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE). Regulatory
+disclosures: [docs/DISCLAIMER.md](docs/DISCLAIMER.md).
+
+## Secrets (Doppler)
+
+Runtime and deploy secrets live in the **Doppler** project `minervamnt` (configs
+`dev` / `prd`), not in git. One-time setup in this repo:
+
+```bash
+doppler setup   # project: minervamnt, config: dev
+doppler secrets --only-names
+doppler run -- cargo run
+```
+
+Copied from the shared infra vault: `GITHUB_PAT`, Bitcoin RPC credentials,
+Cloudflare API/tunnel/zone tokens, and `CLOUDFLARE_ACCOUNT_ID`. Use `prd` config
+on the Pi or in production deploy scripts.
