@@ -35,29 +35,6 @@ The goal is **freedom-tech infrastructure**: ecash issuance and redemption
 where no single vendor controls the full stack — open protocols, auditable
 liabilities, and an exit path that does not depend on the mint staying online.
 
-## Sovereign Engineering Cohort (SEC-08)
-
-This project is being developed for **[SEC-08](https://sovereignengineering.io)**
-(July 20 – August 28, 2026, Madeira) — six weeks of open exploration with
-builders working on protocols and tools no single entity can control.
-
-**What we bring:** a working Rust scaffold with NUT routes, VTXO inventory,
-signatory policy gates, Proof of Liabilities epochs (OpenTimestamps-anchored),
-and V-PACK verification hooks.
-
-**What we want to ship at cohort:**
-
-- Live **Ark ASP** integration (`arkade` / `second`) behind the `ArkClient` trait
-- **CDK** BDHKE + remote **signatory** (keys off the API process)
-- Operator-run **transparency dashboard** from `/transparency/*` endpoints
-- Documented path for **user-held V-PACK** exit material (trust-minimized mode)
-- Real-world test mint on testnet/signet with public PoL roots
-
-If you are building adjacent freedom tech (Cashu, Ark, ecash wallets, audit
-tools) and heading to Madeira, we'd love to collaborate.
-
-→ [Apply to SEC-08 (YOLO++)](https://sovereignengineering.io) · [sovereignengineering.io](https://sovereignengineering.io)
-
 ## Architecture
 
 ```
@@ -209,8 +186,8 @@ Never commit RPC passwords, ASP keys, or tunnel tokens to git.
 | VTXO inventory + refresh scheduler | Done |
 | SignatoryPolicy + PoL epochs + OTS | Done |
 | V-PACK verify at insert | Done |
-| Real Ark ASP client | SEC-08 target |
-| CDK BDHKE + remote signatory | SEC-08 target |
+| Real Ark ASP client | Planned |
+| CDK BDHKE + remote signatory | Planned |
 | NUT-20 signed quotes | Planned |
 | User-delivered V-PACK at mint | Planned |
 | PostgreSQL backend option | Planned |
@@ -248,4 +225,3 @@ Regulatory disclosures: [docs/DISCLAIMER.md](docs/DISCLAIMER.md)
 - [Cashu CDK](https://github.com/cashubtc/cdk)
 - [Ark protocol](https://ark-protocol.org/)
 - [PoL specification](https://gist.github.com/victorandre957/4f497d385e1fd9a47898480903f56b3e)
-- [Sovereign Engineering](https://sovereignengineering.io)
