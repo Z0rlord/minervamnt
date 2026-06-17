@@ -5,8 +5,13 @@
 //! path to Bitcoin L1.
 
 pub mod api;
+pub mod ark_arkade;
+pub mod ark_barkd;
 pub mod ark_client;
+pub mod ark_wallet_http;
 pub mod bitcoin;
+pub mod blind_signer;
+pub mod bolt11_util;
 pub mod config;
 pub mod error;
 pub mod health;

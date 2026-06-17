@@ -5,7 +5,8 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use minerva_mint::api::router;
-use minerva_mint::ark_client::MockArkClient;
+use minerva_mint::ark_client::build_ark_client;
+use minerva_mint::blind_signer::build_blind_signer;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::ots::HttpOtsStamper;
 use minerva_mint::pol::PolLedger;
@@ -50,12 +51,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    tracing::warn!("using MOCK Ark client — no real ASP integration yet");
-    let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+    let ark = build_ark_client(&config.ark).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let signer = build_blind_signer(&config.signatory).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let backend = Arc::new(MintBackend::new(
         config.clone(),
         ark,
+        signer,
         inventory,
         pol,
         ots,

@@ -9,10 +9,12 @@
 //!   offboarding or LN through the ASP's gateway) -> release VTXO mapping.
 //! - Swap (`/v1/swap`): pure blind-signature refresh; no Ark interaction.
 //!
-//! Blind signatures are MOCKED (deterministic SHA-256) in the scaffold; the
-//! real implementation will use the cdk's NUT-00 BDHKE primitives.
+//! Blind signatures use [`crate::blind_signer::BlindSigner`] (mock, remote CDK
+//! signatory, or local dev dhke).
 
 use crate::ark_client::ArkClient;
+use crate::blind_signer::BlindSigner;
+use crate::bolt11_util::{decode_invoice, mock_amount_from_request};
 use crate::config::AppConfig;
 use crate::error::{MintError, Result};
 use crate::ots::{digest_from_root_hex, OtsStamper};
@@ -42,6 +44,8 @@ struct MintQuote {
 struct MeltQuote {
     amount_sat: u64,
     fee_reserve_sat: u64,
+    request: String,
+    payment_hash: Option<String>,
     state: QuoteState,
     expiry: u64,
 }
@@ -49,6 +53,7 @@ struct MeltQuote {
 pub struct MintBackend {
     config: AppConfig,
     ark: Arc<dyn ArkClient>,
+    signer: Arc<dyn BlindSigner>,
     inventory: VtxoInventory,
     pol: PolLedger,
     ots: Option<Arc<dyn OtsStamper>>,
@@ -65,6 +70,7 @@ impl MintBackend {
     pub fn new(
         config: AppConfig,
         ark: Arc<dyn ArkClient>,
+        signer: Arc<dyn BlindSigner>,
         inventory: VtxoInventory,
         pol: PolLedger,
         ots: Option<Arc<dyn OtsStamper>>,
@@ -77,6 +83,7 @@ impl MintBackend {
             ots,
             config,
             ark,
+            signer,
             inventory,
             mint_quotes: Mutex::new(HashMap::new()),
             melt_quotes: Mutex::new(HashMap::new()),
@@ -105,20 +112,6 @@ impl MintBackend {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    }
-
-    /// Deterministic mock blind signature. Real impl: BDHKE `C_ = k * B_`.
-    fn mock_blind_sign(output: &BlindedMessage) -> BlindSignature {
-        let mut hasher = Sha256::new();
-        hasher.update(b"minerva-mock-sig");
-        hasher.update(output.id.as_bytes());
-        hasher.update(output.amount.to_be_bytes());
-        hasher.update(output.b.as_bytes());
-        BlindSignature {
-            amount: output.amount,
-            id: output.id.clone(),
-            c: hex::encode(hasher.finalize()),
-        }
     }
 
     fn validate_outputs(outputs: &[BlindedMessage]) -> Result<u64> {
@@ -176,9 +169,12 @@ impl MintBackend {
     // -- NUT-06 ------------------------------------------------------------
 
     pub fn info(&self) -> MintInfo {
+        // Pubkey is resolved synchronously for the scaffold; remote signatory
+        // updates this on first request in production via cached keyset fetch.
+        let pubkey = "02".to_string() + &"11".repeat(32);
         MintInfo {
             name: self.config.mint.name.clone(),
-            pubkey: "02".to_string() + &"11".repeat(32),
+            pubkey,
             version: format!("minerva-mint/{}", env!("CARGO_PKG_VERSION")),
             description: self.config.mint.description.clone(),
             contact: vec![],
@@ -316,7 +312,7 @@ impl MintBackend {
             })?;
         }
 
-        let signatures = req.outputs.iter().map(Self::mock_blind_sign).collect();
+        let signatures = self.signer.blind_sign(&req.outputs).await?;
 
         let b_points: Vec<String> = req.outputs.iter().map(|o| o.b.clone()).collect();
         self.pol
@@ -371,11 +367,17 @@ impl MintBackend {
             return Err(MintError::InvalidRequest("empty payment request".into()));
         }
 
-        // No bolt11 decoding in the scaffold: derive a deterministic amount
-        // from the request string so tests are stable. Real impl decodes the
-        // invoice (or Ark address + amount).
-        let amount_sat = (req.request.len() as u64) * 100;
-        let fee_reserve_sat = (amount_sat / 100).max(1);
+        let live = self.config.melt_uses_live_payout();
+        let (amount_sat, payment_hash) = match decode_invoice(&req.request) {
+            Ok((amount, hash)) => (amount, Some(hash)),
+            Err(e) if live => return Err(e),
+            Err(_) => (mock_amount_from_request(&req.request), None),
+        };
+
+        let fee_reserve_sat = self
+            .ark
+            .estimate_lightning_send_fee_sat(amount_sat)
+            .await?;
 
         let quote_id = Uuid::new_v4().to_string();
         let expiry = Self::now() + QUOTE_TTL_SECS;
@@ -384,6 +386,8 @@ impl MintBackend {
             MeltQuote {
                 amount_sat,
                 fee_reserve_sat,
+                request: req.request,
+                payment_hash,
                 state: QuoteState::Unpaid,
                 expiry,
             },
@@ -416,7 +420,7 @@ impl MintBackend {
     }
 
     pub async fn melt(&self, req: MeltBolt11Request) -> Result<MeltBolt11Response> {
-        let (amount_sat, fee_reserve_sat) = {
+        let (amount_sat, fee_reserve_sat, invoice) = {
             let quotes = self.melt_quotes.lock().unwrap();
             let q = quotes
                 .get(&req.quote)
@@ -430,7 +434,7 @@ impl MintBackend {
                     req.quote
                 )));
             }
-            (q.amount_sat, q.fee_reserve_sat)
+            (q.amount_sat, q.fee_reserve_sat, q.request.clone())
         };
 
         let input_total = self.verify_and_spend_inputs(&req.inputs)?;
@@ -442,16 +446,15 @@ impl MintBackend {
         }
         self.record_melt_burns(&req.inputs)?;
 
-        // Payout via the ASP. In the scaffold this is a no-op "preimage";
-        // real impl: Ark offboarding tx or LN payment through the ASP.
-        let mut hasher = Sha256::new();
-        hasher.update(req.quote.as_bytes());
-        let preimage = hex::encode(hasher.finalize());
-
-        // Release any token batch mappings whose quote ids match melted
-        // batches. (Scaffold simplification: melt requests don't carry the
-        // original mint quote id, so unmapping happens via /ark endpoints or
-        // operator tooling; documented in README open questions.)
+        let preimage = if self.config.melt_uses_live_payout() {
+            self.ark
+                .pay_lightning_invoice(&invoice, amount_sat)
+                .await?
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(invoice.as_bytes());
+            hex::encode(hasher.finalize())
+        };
 
         self.melt_quotes
             .lock()
@@ -497,7 +500,7 @@ impl MintBackend {
             })?;
         }
         self.verify_and_spend_inputs(&req.inputs)?;
-        let signatures = req.outputs.iter().map(Self::mock_blind_sign).collect();
+        let signatures = self.signer.blind_sign(&req.outputs).await?;
         Ok(SwapResponse { signatures })
     }
 
@@ -529,15 +532,22 @@ impl MintBackend {
             .get_vtxo(&mapping.vtxo_id)?
             .ok_or_else(|| MintError::MappingNotFound(mapping.vtxo_id.clone()))?;
 
-        let txid = self.ark.unilateral_exit(&record.vtxo).await?;
+        let exit = self.ark.unilateral_exit(&record.vtxo).await?;
         self.inventory
             .set_status(&mapping.vtxo_id, crate::types::VtxoStatus::Exited)?;
         self.inventory.release_vtxo_mapping(token_id)?;
+
+        let txid = exit
+            .claim_txid
+            .clone()
+            .unwrap_or_else(|| exit.exit_txid.clone());
 
         Ok(ExitResponse {
             token_id: token_id.to_string(),
             vtxo_id: mapping.vtxo_id,
             txid,
+            phase: exit.phase,
+            claim_txid: exit.claim_txid,
         })
     }
 
@@ -689,6 +699,7 @@ impl MintBackend {
 mod tests {
     use super::*;
     use crate::ark_client::MockArkClient;
+    use crate::blind_signer::build_blind_signer;
 
     fn test_config() -> AppConfig {
         let raw = include_str!("../config.toml");
@@ -698,9 +709,10 @@ mod tests {
     fn backend() -> MintBackend {
         let config = test_config();
         let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
-        MintBackend::new(config, ark, inventory, pol, None)
+        MintBackend::new(config, ark, signer, inventory, pol, None)
     }
 
     /// Decompose `amount` into powers of two per NUT-00. `tag` keeps blinded
@@ -800,9 +812,8 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, MintError::TokenAlreadySpent));
 
-        // 3. Melt with the new proofs. The scaffold derives the melt amount
-        // from the request length: "lnbc1" -> 5 * 100 = 500 sat + 5 fee,
-        // which the 1000 sat of swapped proofs comfortably covers.
+        // 3. Melt with the new proofs. Mock mode uses scaffold amount from
+        // request length: "lnbc1" -> 5 * 100 = 500 sat + fee reserve.
         let melt_quote = b
             .melt_quote(MeltQuoteBolt11Request {
                 request: "lnbc1".into(),
@@ -925,9 +936,11 @@ mod tests {
         let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
+        let signer = build_blind_signer(&config.signatory).unwrap();
         let b = MintBackend::new(
             config,
             ark,
+            signer,
             inventory,
             pol,
             Some(Arc::new(crate::ots::MockOtsStamper)),

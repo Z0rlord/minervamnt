@@ -16,8 +16,9 @@ rather than a hot Lightning node.
 
 > **Status: active scaffold.** Default dev mode uses mock ASP + mock BDHKE.
 > Production-shaped paths are wired: **barkd** and **Arkade** ASP clients,
-> **cdk-signatory** remote signing, and optional **exit auto-claim**. Melt
-> payout and `/v1/info` pubkey metadata remain scaffolded.
+> **cdk-signatory** remote signing, optional **exit auto-claim**, and **live
+> melt payout** when `ark.backend = barkd`. `/v1/info` pubkey metadata remains
+> scaffolded.
 
 ## Why this exists
 
@@ -105,6 +106,7 @@ environment variables (see `.env.example`).
 | `[database]` | `path` | SQLite file location |
 | `[trust]` | `vtxo_verify_mode`, `pol_enabled`, … | Verification & PoL |
 | `[trust.ots]` | `enabled`, `calendar_urls` | OpenTimestamps stamping |
+| `[melt]` | `backend` | Melt payout: `inherit`, `mock`, or `barkd` |
 
 Common env vars: `BITCOIN_RPC_URL`, `BITCOIN_RPC_USER`, `BITCOIN_RPC_PASSWORD`,
 `MINERVA_CONFIG`, `MINERVA_MINT_URL`, `RUST_LOG`.
@@ -194,7 +196,8 @@ Never commit RPC passwords, ASP keys, or tunnel tokens to git.
 | Arkade ASP client (`ArkadeArkClient`) | Done |
 | CDK BDHKE + remote signatory (`BlindSigner`) | Done |
 | Exit claim automation (barkd wallet API) | Done |
-| Mainnet ASP hardening + live melt payout | Planned |
+| Signet melt payout via barkd lightning pay | Done (signet) |
+| Mainnet ASP hardening + melt at scale | Planned |
 | NUT-20 signed quotes | Planned |
 | User-delivered V-PACK at mint | Planned |
 | PostgreSQL backend option | Planned |

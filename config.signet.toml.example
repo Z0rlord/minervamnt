@@ -1,0 +1,56 @@
+# Signet profile — copy and point MINERVA_CONFIG at it.
+# Requires local barkd wired to Second signet ASP (see docs/signet-asp.md).
+
+[mint]
+name = "Minerva Mint (signet)"
+description = "Ark-backed Cashu mint — signet test instance"
+url = "http://127.0.0.1:3338"
+
+[ark]
+backend = "barkd"
+server_url = "https://ark.signet.2nd.dev"
+server_pubkey = ""
+barkd_url = "http://127.0.0.1:3535"
+poll_timeout_secs = 600
+poll_interval_secs = 5
+# Signet ASP uses shorter VTXO lifetimes than mainnet.
+refresh_threshold_blocks = 72
+default_vtxo_expiry = 288
+# exit_claim_address = "tb1..."
+auto_claim_exits = false
+
+[signatory]
+# mock | remote (cdk-signatory) | local (dev-only)
+backend = "mock"
+# url = "http://127.0.0.1:3340"
+
+[bitcoin]
+# Point at your signet bitcoind (Pi or local). Esplora-only is not enough for barkd.
+rpc_url = "http://127.0.0.1:38332"
+
+[liquidity]
+min_vtxo_reserve_msat = 100_000_000
+max_single_vtxo_msat = 10_000_000_000
+auto_board_threshold = 0.5
+
+[database]
+path = "data/minerva-signet.sqlite"
+
+[server]
+host = "127.0.0.1"
+port = 3338
+
+[scheduler]
+refresh_interval_secs = 60
+
+[melt]
+# inherit → live lightning pay when ark.backend = barkd
+backend = "inherit"
+
+[trust]
+vtxo_verify_mode = "scaffold"
+signatory_policy_enforced = true
+pol_enabled = true
+
+[trust.ots]
+enabled = false

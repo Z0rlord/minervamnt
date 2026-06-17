@@ -237,12 +237,27 @@ pub struct ExitRequest {
     pub token_id: String,
 }
 
+/// Result of a unilateral exit through the Ark wallet daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExitResult {
+    /// First on-chain exit txid, or VTXO id while in progress.
+    pub exit_txid: String,
+    /// Exit phase: `started`, `processing`, `awaiting-delta`, `claimable`, `claimed`.
+    pub phase: String,
+    /// On-chain claim txid when `auto_claim` swept funds to `exit_claim_address`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_txid: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitResponse {
     pub token_id: String,
     pub vtxo_id: String,
-    /// Broadcast txid of the leaf transaction.
+    /// Primary exit identifier (claim txid when available, else exit txid).
     pub txid: String,
+    pub phase: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_txid: Option<String>,
 }
 
 /// `GET /ark/refresh/status`
