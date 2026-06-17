@@ -3,15 +3,19 @@ name = "minerva-mint"
 version = "0.1.0"
 edition = "2021"
 description = "Minerva Mint — Ark-backed Cashu mint"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 readme = "README.md"
 
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
+cdk-common = "0.17.0-rc.3"
+cdk-signatory = { version = "0.17.0-rc.3", default-features = false, features = ["grpc"] }
 dotenvy = "0.15"
 hex = "0.4"
+k256 = { version = "0.13", features = ["ecdsa", "schnorr"] }
+rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 vpack = "1.0.0-rc.1"
+ark-rest = "0.9.2"
 
 [dev-dependencies]
 http-body-util = "0.1"

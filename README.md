@@ -1,7 +1,7 @@
 # Minerva Mint
 
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 **Ark-backed Cashu mint** — Chaumian ecash where issued tokens are backed by
 [Ark](https://ark-protocol.org) VTXOs instead of Lightning channel liquidity.
@@ -14,9 +14,10 @@ rather than a hot Lightning node.
 > jurisdictions. This is **experimental software** with **no warranty**.
 > See [docs/DISCLAIMER.md](docs/DISCLAIMER.md) before deploying for others.
 
-> **Status: active scaffold.** End-to-end flows run against a mock ASP and mock
-> BDHKE. Production paths (real ASP client, CDK signatory, live Bitcoin RPC)
-> are designed behind traits and documented in the roadmap below.
+> **Status: active scaffold.** Default dev mode uses mock ASP + mock BDHKE.
+> Production-shaped paths are wired: **barkd** and **Arkade** ASP clients,
+> **cdk-signatory** remote signing, and optional **exit auto-claim**. Melt
+> payout and `/v1/info` pubkey metadata remain scaffolded.
 
 ## Why this exists
 
@@ -97,7 +98,8 @@ environment variables (see `.env.example`).
 | ------- | ---- | ------- |
 | `[mint]` | `name`, `url`, `description` | Identity on `/v1/info` |
 | `[server]` | `host`, `port` | HTTP bind address |
-| `[ark]` | `server_url`, `server_pubkey`, expiry blocks | ASP connection |
+| `[ark]` | `backend`, `server_url`, `barkd_url` / `wallet_url`, exit claim | ASP + wallet daemon |
+| `[signatory]` | `backend`, `url` | BDHKE signing (mock / remote / local) |
 | `[bitcoin]` | `rpc_url` (+ env user/password) | Your Bitcoin Core RPC |
 | `[liquidity]` | reserve / board thresholds | VTXO sizing policy |
 | `[database]` | `path` | SQLite file location |
@@ -172,8 +174,10 @@ Typical production layout:
 1. Build release binary: `cargo build --release`
 2. Run behind reverse proxy or tunnel with TLS termination
 3. Point `[bitcoin].rpc_url` at your synced node (mainnet or signet)
-4. Connect a real Ark ASP; set `[trust] vtxo_verify_mode = "vpack"`
-5. Run **CDK signatory** on a separate host; disable mint-side signing keys
+4. Connect a real Ark ASP — signet via barkd ([docs/signet-asp.md](docs/signet-asp.md))
+   or Arkade ([docs/arkade-asp.md](docs/arkade-asp.md)); set
+   `[trust] vtxo_verify_mode = "vpack"` on mainnet
+5. Set `signatory.backend = "remote"` and run **cdk-signatory** on a separate host
 6. Expose `/transparency/summary` publicly for third-party reconciliation
 
 Never commit RPC passwords, ASP keys, or tunnel tokens to git.
@@ -186,8 +190,11 @@ Never commit RPC passwords, ASP keys, or tunnel tokens to git.
 | VTXO inventory + refresh scheduler | Done |
 | SignatoryPolicy + PoL epochs + OTS | Done |
 | V-PACK verify at insert | Done |
-| Real Ark ASP client | Planned |
-| CDK BDHKE + remote signatory | Planned |
+| Signet ASP via barkd (`BarkdArkClient`) | Done (signet) |
+| Arkade ASP client (`ArkadeArkClient`) | Done |
+| CDK BDHKE + remote signatory (`BlindSigner`) | Done |
+| Exit claim automation (barkd wallet API) | Done |
+| Mainnet ASP hardening + live melt payout | Planned |
 | NUT-20 signed quotes | Planned |
 | User-delivered V-PACK at mint | Planned |
 | PostgreSQL backend option | Planned |
@@ -215,7 +222,11 @@ cargo test
 
 ## License
 
-GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
+GNU Affero General Public License v3.0 or later — see [LICENSE](LICENSE).
+
+If you run a **modified** version of this software as a **public network
+service** (e.g. a mint API), AGPL requires you to offer corresponding source
+to users interacting with that service.
 
 Regulatory disclosures: [docs/DISCLAIMER.md](docs/DISCLAIMER.md)
 
@@ -224,4 +235,5 @@ Regulatory disclosures: [docs/DISCLAIMER.md](docs/DISCLAIMER.md)
 - [Cashu NUTs](https://github.com/cashubtc/nuts)
 - [Cashu CDK](https://github.com/cashubtc/cdk)
 - [Ark protocol](https://ark-protocol.org/)
+- [Signet ASP setup](docs/signet-asp.md) · [Arkade ASP setup](docs/arkade-asp.md)
 - [PoL specification](https://gist.github.com/victorandre957/4f497d385e1fd9a47898480903f56b3e)
