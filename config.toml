@@ -4,8 +4,12 @@ description = "Cashu mint backed by Ark VTXOs"
 url = "https://mint.example.com"
 
 [ark]
+backend = "mock"
 server_url = "https://asp.example.com"
 server_pubkey = "02placeholderpubkey0000000000000000000000000000000000000000000000000000"
+barkd_url = "http://127.0.0.1:3535"
+# exit_claim_address = "tb1..."
+auto_claim_exits = false
 refresh_threshold_blocks = 144
 default_vtxo_expiry = 25920
 
@@ -27,6 +31,16 @@ port = 3338
 
 [scheduler]
 refresh_interval_secs = 60
+
+[melt]
+# inherit | mock | barkd — inherit follows ark.backend
+backend = "inherit"
+
+[signatory]
+backend = "mock"
+# remote: cdk-signatory gRPC (production)
+# url = "http://127.0.0.1:3340"
+# local: dev-only dhke (SIGNATORY_MINT_SECRET hex)
 
 [trust]
 # VTXO verification at boarding: "scaffold" (dev/mock ASP) or "vpack" (production).

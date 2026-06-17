@@ -12,6 +12,8 @@ use std::path::Path;
 pub struct AppConfig {
     pub mint: MintConfig,
     pub ark: ArkConfig,
+    #[serde(default)]
+    pub signatory: SignatoryConfig,
     pub bitcoin: BitcoinConfig,
     pub liquidity: LiquidityConfig,
     pub database: DatabaseConfig,
@@ -21,6 +23,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    #[serde(default)]
+    pub melt: MeltConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,12 +36,79 @@ pub struct MintConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArkConfig {
+    /// `mock` (default) or `barkd` (local barkd → live ASP).
+    #[serde(default = "default_ark_backend")]
+    pub backend: String,
     pub server_url: String,
     pub server_pubkey: String,
+    /// barkd REST base URL when `backend = "barkd"`.
+    #[serde(default = "default_barkd_url")]
+    pub barkd_url: String,
+    /// Max wait for board/refresh round completion.
+    #[serde(default = "default_poll_timeout_secs")]
+    pub poll_timeout_secs: u64,
+    #[serde(default = "default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
     /// Refresh VTXOs when they are within this many blocks of expiry.
     pub refresh_threshold_blocks: u64,
     /// Default VTXO lifetime in blocks (~6 months at 25920).
     pub default_vtxo_expiry: u64,
+    /// On-chain address for auto-sweep after exit (`auto_claim_exits = true`).
+    #[serde(default)]
+    pub exit_claim_address: Option<String>,
+    /// Poll exit status and call claim when claimable (barkd / wallet daemon).
+    #[serde(default = "default_false")]
+    pub auto_claim_exits: bool,
+    /// Arkade (and other) wallet daemon REST URL (barkd-compatible API).
+    #[serde(default)]
+    pub wallet_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SignatoryConfig {
+    /// `mock` (default), `remote` (cdk-signatory gRPC), or `local` (dev dhke).
+    #[serde(default = "default_signatory_backend")]
+    pub backend: String,
+    /// gRPC URL for `remote`, e.g. `http://127.0.0.1:3340`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional mTLS cert directory for remote signatory.
+    #[serde(default)]
+    pub tls_dir: Option<String>,
+}
+
+fn default_signatory_backend() -> String {
+    "mock".into()
+}
+
+fn default_false() -> bool {
+    false
+}
+
+impl Default for SignatoryConfig {
+    fn default() -> Self {
+        SignatoryConfig {
+            backend: default_signatory_backend(),
+            url: None,
+            tls_dir: None,
+        }
+    }
+}
+
+fn default_ark_backend() -> String {
+    "mock".into()
+}
+
+fn default_barkd_url() -> String {
+    "http://127.0.0.1:3535".into()
+}
+
+fn default_poll_timeout_secs() -> u64 {
+    600
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -154,7 +225,41 @@ impl Default for SchedulerConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeltConfig {
+    /// `inherit` (default) — follow `ark.backend` (`mock` → scaffold payout,
+    /// `barkd`/`arkade` → live lightning pay via wallet daemon).
+    /// `mock` — deterministic preimage, scaffold fee logic for non-BOLT11 requests.
+    /// `barkd` — always pay via wallet daemon lightning API (requires barkd/arkade).
+    #[serde(default = "default_melt_backend")]
+    pub backend: String,
+}
+
+fn default_melt_backend() -> String {
+    "inherit".into()
+}
+
+impl Default for MeltConfig {
+    fn default() -> Self {
+        MeltConfig {
+            backend: default_melt_backend(),
+        }
+    }
+}
+
 impl AppConfig {
+    /// Effective melt payout backend after resolving `inherit`.
+    pub fn effective_melt_backend(&self) -> &str {
+        match self.melt.backend.as_str() {
+            "inherit" => self.ark.backend.as_str(),
+            other => other,
+        }
+    }
+
+    pub fn melt_uses_live_payout(&self) -> bool {
+        matches!(self.effective_melt_backend(), "barkd" | "arkade")
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let _ = dotenvy::dotenv();
         let contents = std::fs::read_to_string(path.as_ref())
@@ -172,11 +277,48 @@ impl AppConfig {
         if let Ok(v) = std::env::var("MINERVA_MINT_URL") {
             self.mint.url = v;
         }
+        if let Ok(v) = std::env::var("ARK_BACKEND") {
+            self.ark.backend = v;
+        }
         if let Ok(v) = std::env::var("ARK_SERVER_URL") {
             self.ark.server_url = v;
         }
         if let Ok(v) = std::env::var("ARK_SERVER_PUBKEY") {
             self.ark.server_pubkey = v;
+        }
+        if let Ok(v) = std::env::var("BARKD_URL") {
+            self.ark.barkd_url = v;
+        }
+        if let Ok(v) = std::env::var("ARK_WALLET_URL") {
+            self.ark.wallet_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("ARK_EXIT_CLAIM_ADDRESS") {
+            self.ark.exit_claim_address = Some(v);
+        }
+        if let Ok(v) = std::env::var("ARK_AUTO_CLAIM_EXITS") {
+            self.ark.auto_claim_exits = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("SIGNATORY_BACKEND") {
+            self.signatory.backend = v;
+        }
+        if let Ok(v) = std::env::var("SIGNATORY_URL") {
+            self.signatory.url = Some(v);
+        }
+        if let Ok(v) = std::env::var("SIGNATORY_TLS_DIR") {
+            self.signatory.tls_dir = Some(v);
+        }
+        if let Ok(v) = std::env::var("ARK_POLL_TIMEOUT_SECS") {
+            if let Ok(n) = v.parse() {
+                self.ark.poll_timeout_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("ARK_POLL_INTERVAL_SECS") {
+            if let Ok(n) = v.parse() {
+                self.ark.poll_interval_secs = n;
+            }
+        }
+        if let Ok(v) = std::env::var("MELT_BACKEND") {
+            self.melt.backend = v;
         }
         if let Ok(v) = std::env::var("BITCOIN_RPC_URL") {
             self.bitcoin.rpc_url = v;
@@ -225,6 +367,7 @@ mod tests {
         let raw = include_str!("../config.toml");
         let cfg: AppConfig = toml::from_str(raw).expect("config.toml must parse");
         assert_eq!(cfg.mint.name, "Minerva Mint");
+        assert_eq!(cfg.ark.backend, "mock");
         assert_eq!(cfg.ark.refresh_threshold_blocks, 144);
         assert_eq!(cfg.ark.default_vtxo_expiry, 25920);
         assert!(cfg.liquidity.min_vtxo_reserve_msat > 0);

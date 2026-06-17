@@ -126,6 +126,7 @@ pub async fn run_ots_upgrade_worker(backend: Arc<MintBackend>, interval: Duratio
 mod tests {
     use super::*;
     use crate::ark_client::{ArkClient, MockArkClient};
+    use crate::blind_signer::build_blind_signer;
     use crate::config::AppConfig;
     use crate::pol::PolLedger;
     use crate::vtxo_inventory::VtxoInventory;
@@ -133,9 +134,10 @@ mod tests {
     fn backend_with_ark(ark: Arc<MockArkClient>) -> MintBackend {
         let raw = include_str!("../config.toml");
         let config: AppConfig = toml::from_str(raw).unwrap();
+        let signer = build_blind_signer(&config.signatory).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
-        MintBackend::new(config, ark, inventory, pol, None)
+        MintBackend::new(config, ark, signer, inventory, pol, None)
     }
 
     #[tokio::test]

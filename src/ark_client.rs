@@ -1,12 +1,16 @@
 //! Ark client abstraction.
 //!
 //! `ArkClient` is the trait boundary between the mint and the Ark Service
-//! Provider (ASP). The real implementation will wrap the `arkade`/`second`
-//! client library and talk to a live ASP; the scaffold ships a deterministic
-//! in-memory `MockArkClient` so the full mint flow is testable end-to-end.
+//! Provider (ASP). Production signet uses [`crate::ark_barkd::BarkdArkClient`]
+//! (local `barkd` → Second signet ASP). Tests and local dev use
+//! [`MockArkClient`].
 
+use crate::ark_arkade::ArkadeArkClient;
+use crate::ark_barkd::BarkdArkClient;
+use crate::config::ArkConfig;
 use crate::error::{MintError, Result};
-use crate::types::Vtxo;
+use crate::types::{ExitResult, Vtxo};
+use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -25,9 +29,8 @@ pub trait ArkClient: Send + Sync {
     /// Roll a VTXO into a fresh round before it expires.
     async fn refresh_vtxo(&self, vtxo: &Vtxo) -> Result<Vtxo>;
 
-    /// Broadcast the pre-signed branch/leaf transactions to exit to L1.
-    /// Returns the txid of the broadcast leaf transaction.
-    async fn unilateral_exit(&self, vtxo: &Vtxo) -> Result<String>;
+    /// Start (and optionally auto-claim) a unilateral exit to L1.
+    async fn unilateral_exit(&self, vtxo: &Vtxo) -> Result<ExitResult>;
 
     /// Time remaining until the VTXO expires (based on current block height).
     async fn get_vtxo_expiry(&self, vtxo: &Vtxo) -> Result<Duration>;
@@ -37,6 +40,12 @@ pub trait ArkClient: Send + Sync {
 
     /// Connectivity check for the health monitor.
     async fn ping(&self) -> Result<()>;
+
+    /// Estimate the wallet fee (sat) to pay a Lightning invoice of `amount_sat`.
+    async fn estimate_lightning_send_fee_sat(&self, amount_sat: u64) -> Result<u64>;
+
+    /// Pay a BOLT11 invoice from the ASP wallet balance; returns payment preimage hex.
+    async fn pay_lightning_invoice(&self, invoice: &str, amount_sat: u64) -> Result<String>;
 }
 
 /// Deterministic in-memory mock of an ASP.
@@ -114,15 +123,19 @@ impl ArkClient for MockArkClient {
         Ok(fresh)
     }
 
-    async fn unilateral_exit(&self, vtxo: &Vtxo) -> Result<String> {
+    async fn unilateral_exit(&self, vtxo: &Vtxo) -> Result<ExitResult> {
         let mut issued = self.issued.lock().unwrap();
         if issued.remove(&vtxo.id).is_none() {
             return Err(MintError::Ark(format!("unknown vtxo: {}", vtxo.id)));
         }
-        // The "txid" of the broadcast leaf tx is just its hash in the mock.
         let mut hasher = Sha256::new();
         hasher.update(vtxo.leaf_tx.as_bytes());
-        Ok(hex::encode(hasher.finalize()))
+        let exit_txid = hex::encode(hasher.finalize());
+        Ok(ExitResult {
+            exit_txid: exit_txid.clone(),
+            phase: "claimed".into(),
+            claim_txid: Some(exit_txid),
+        })
     }
 
     async fn get_vtxo_expiry(&self, vtxo: &Vtxo) -> Result<Duration> {
@@ -137,6 +150,47 @@ impl ArkClient for MockArkClient {
 
     async fn ping(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn estimate_lightning_send_fee_sat(&self, amount_sat: u64) -> Result<u64> {
+        Ok((amount_sat / 100).max(1))
+    }
+
+    async fn pay_lightning_invoice(&self, invoice: &str, _amount_sat: u64) -> Result<String> {
+        let mut hasher = Sha256::new();
+        hasher.update(invoice.as_bytes());
+        Ok(hex::encode(hasher.finalize()))
+    }
+}
+
+/// Build the configured Ark backend (`mock`, `barkd`, or `arkade`).
+pub fn build_ark_client(config: &ArkConfig) -> Result<Arc<dyn ArkClient>> {
+    let backend = config.backend.as_str();
+    match backend {
+        "mock" => Ok(Arc::new(MockArkClient::new(config.default_vtxo_expiry))),
+        "barkd" => {
+            let token = std::env::var("BARKD_AUTH_TOKEN").ok();
+            tracing::info!(
+                asp = %config.server_url,
+                barkd = %config.barkd_url,
+                "using barkd Ark client"
+            );
+            Ok(Arc::new(BarkdArkClient::new(config, token.as_deref())?))
+        }
+        "arkade" => {
+            let token = std::env::var("ARKADE_WALLET_AUTH_TOKEN")
+                .or_else(|_| std::env::var("BARKD_AUTH_TOKEN"))
+                .ok();
+            tracing::info!(
+                asp = %config.server_url,
+                wallet = ?config.wallet_url,
+                "using Arkade Ark client"
+            );
+            Ok(Arc::new(ArkadeArkClient::new(config, token.as_deref())?))
+        }
+        other => Err(MintError::Ark(format!(
+            "unknown ark.backend {other:?}; expected \"mock\", \"barkd\", or \"arkade\""
+        ))),
     }
 }
 
@@ -158,8 +212,8 @@ mod tests {
         // Old VTXO is consumed by the refresh.
         assert!(ark.refresh_vtxo(&vtxo).await.is_err());
 
-        let txid = ark.unilateral_exit(&fresh).await.unwrap();
-        assert_eq!(txid.len(), 64);
+        let exit = ark.unilateral_exit(&fresh).await.unwrap();
+        assert_eq!(exit.exit_txid.len(), 64);
         // Exited VTXO cannot be exited again.
         assert!(ark.unilateral_exit(&fresh).await.is_err());
     }
