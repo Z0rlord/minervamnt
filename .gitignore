@@ -20,6 +20,7 @@ secrets.toml
 
 # Internal operator config (use local copy; not for public repo)
 doppler.yaml
+config.signet.toml
 
 # Databases & runtime data
 /data/
