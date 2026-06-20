@@ -8,7 +8,8 @@
 
 use crate::config::SignatoryConfig;
 use crate::error::{MintError, Result};
-use crate::types::{BlindSignature, BlindedMessage};
+use crate::keyset_cache::MintKeysetState;
+use crate::types::{BlindSignature, BlindedMessage, KeysetInfo, KEYSET_ID};
 use async_trait::async_trait;
 use cdk_common::{Amount, BlindedMessage as CdkBlindedMessage, Id, PublicKey};
 use cdk_signatory::signatory::Signatory;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub trait BlindSigner: Send + Sync {
     async fn blind_sign(&self, outputs: &[BlindedMessage]) -> Result<Vec<BlindSignature>>;
     async fn mint_pubkey_hex(&self) -> Result<String>;
+    async fn keyset_state(&self) -> Result<MintKeysetState>;
 }
 
 pub fn build_blind_signer(config: &SignatoryConfig) -> Result<Arc<dyn BlindSigner>> {
@@ -58,7 +60,11 @@ impl BlindSigner for MockBlindSigner {
     }
 
     async fn mint_pubkey_hex(&self) -> Result<String> {
-        Ok("02".to_string() + &"11".repeat(32))
+        Ok(self.keyset_state().await?.pubkey)
+    }
+
+    async fn keyset_state(&self) -> Result<MintKeysetState> {
+        Ok(MintKeysetState::mock_default())
     }
 }
 
@@ -120,13 +126,17 @@ impl BlindSigner for RemoteCdkSigner {
     }
 
     async fn mint_pubkey_hex(&self) -> Result<String> {
+        Ok(self.keyset_state().await?.pubkey)
+    }
+
+    async fn keyset_state(&self) -> Result<MintKeysetState> {
         self.connect().await?;
         let guard = self.client.lock().await;
         let client = guard.as_ref().expect("connected");
         let keysets = Signatory::keysets(client)
             .await
             .map_err(|e| MintError::InvalidRequest(format!("signatory keysets: {e}")))?;
-        Ok(keysets.pubkey.to_string())
+        Ok(cdk_keysets_to_state(&keysets))
     }
 }
 
@@ -164,7 +174,20 @@ impl BlindSigner for LocalDhkeSigner {
     }
 
     async fn mint_pubkey_hex(&self) -> Result<String> {
-        Ok(self.pubkey.to_string())
+        Ok(self.keyset_state().await?.pubkey)
+    }
+
+    async fn keyset_state(&self) -> Result<MintKeysetState> {
+        Ok(MintKeysetState {
+            pubkey: self.pubkey.to_string(),
+            active_keyset_id: KEYSET_ID.to_string(),
+            keysets: vec![KeysetInfo {
+                id: KEYSET_ID.to_string(),
+                unit: "sat".to_string(),
+                active: true,
+                input_fee_ppk: Some(0),
+            }],
+        })
     }
 }
 
@@ -183,4 +206,28 @@ fn from_cdk_blind_signature(sig: cdk_common::BlindSignature) -> Result<BlindSign
         id: sig.keyset_id.to_string(),
         c: sig.c.to_string(),
     })
+}
+
+fn cdk_keysets_to_state(keysets: &cdk_signatory::signatory::SignatoryKeysets) -> MintKeysetState {
+    let entries: Vec<KeysetInfo> = keysets
+        .keysets
+        .iter()
+        .map(|ks| KeysetInfo {
+            id: ks.id.to_string(),
+            unit: ks.unit.to_string(),
+            active: ks.active,
+            input_fee_ppk: Some(ks.input_fee_ppk),
+        })
+        .collect();
+    let active_keyset_id = entries
+        .iter()
+        .find(|k| k.active)
+        .or_else(|| entries.first())
+        .map(|k| k.id.clone())
+        .unwrap_or_else(|| KEYSET_ID.to_string());
+    MintKeysetState {
+        pubkey: keysets.pubkey.to_string(),
+        active_keyset_id,
+        keysets: entries,
+    }
 }

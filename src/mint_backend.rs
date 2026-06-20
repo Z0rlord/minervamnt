@@ -17,6 +17,7 @@ use crate::blind_signer::BlindSigner;
 use crate::bolt11_util::{decode_invoice, mock_amount_from_request};
 use crate::config::AppConfig;
 use crate::error::{MintError, Result};
+use crate::keyset_cache::MintKeysetState;
 use crate::ots::{digest_from_root_hex, OtsStamper};
 use crate::pol::PolLedger;
 use crate::signatory::{DefaultSignatoryPolicy, MintSignRequest, SignatoryPolicy, SwapSignRequest};
@@ -25,6 +26,7 @@ use crate::vtxo_inventory::VtxoInventory;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const QUOTE_TTL_SECS: u64 = 600;
@@ -59,6 +61,7 @@ pub struct MintBackend {
     ots: Option<Arc<dyn OtsStamper>>,
     policy: DefaultSignatoryPolicy,
     policy_enforced: bool,
+    keyset_state: RwLock<MintKeysetState>,
     mint_quotes: Mutex<HashMap<String, MintQuote>>,
     melt_quotes: Mutex<HashMap<String, MeltQuote>>,
     /// Spent proof secrets (double-spend guard). In-memory for the scaffold;
@@ -85,9 +88,37 @@ impl MintBackend {
             ark,
             signer,
             inventory,
+            keyset_state: RwLock::new(MintKeysetState::mock_default()),
             mint_quotes: Mutex::new(HashMap::new()),
             melt_quotes: Mutex::new(HashMap::new()),
             spent_secrets: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Load pubkey and keyset metadata from the signatory (call at startup).
+    pub async fn init_keysets(&self) -> Result<()> {
+        let state = self.signer.keyset_state().await?;
+        tracing::info!(
+            active_keyset_id = %state.active_keyset_id,
+            keysets = state.keysets.len(),
+            "signatory keysets loaded"
+        );
+        *self.keyset_state.write().await = state;
+        Ok(())
+    }
+
+    pub fn active_keyset_id(&self) -> String {
+        self.keyset_state
+            .try_read()
+            .ok()
+            .map(|s| s.active_keyset_id.clone())
+            .unwrap_or_else(|| KEYSET_ID.to_string())
+    }
+
+    pub async fn keysets(&self) -> KeysetsResponse {
+        let state = self.keyset_state.read().await;
+        KeysetsResponse {
+            keysets: state.keysets.clone(),
         }
     }
 
@@ -114,15 +145,16 @@ impl MintBackend {
             .as_secs()
     }
 
-    fn validate_outputs(outputs: &[BlindedMessage]) -> Result<u64> {
+    fn validate_outputs(&self, outputs: &[BlindedMessage]) -> Result<u64> {
         if outputs.is_empty() {
             return Err(MintError::InvalidRequest("no outputs provided".into()));
         }
+        let keyset_id = self.active_keyset_id();
         for o in outputs {
-            if o.id != KEYSET_ID {
+            if o.id != keyset_id {
                 return Err(MintError::InvalidRequest(format!(
-                    "unknown keyset id: {}",
-                    o.id
+                    "unknown keyset id: {} (active {})",
+                    o.id, keyset_id
                 )));
             }
             if !o.amount.is_power_of_two() {
@@ -141,8 +173,9 @@ impl MintBackend {
             return Err(MintError::InvalidRequest("no inputs provided".into()));
         }
         let mut spent = self.spent_secrets.lock().unwrap();
+        let keyset_id = self.active_keyset_id();
         for p in inputs {
-            if p.id != KEYSET_ID {
+            if p.id != keyset_id && p.id != KEYSET_ID {
                 return Err(MintError::InvalidRequest(format!(
                     "unknown keyset id: {}",
                     p.id
@@ -168,20 +201,19 @@ impl MintBackend {
 
     // -- NUT-06 ------------------------------------------------------------
 
-    pub fn info(&self) -> MintInfo {
-        // Pubkey is resolved synchronously for the scaffold; remote signatory
-        // updates this on first request in production via cached keyset fetch.
-        let pubkey = "02".to_string() + &"11".repeat(32);
+    pub async fn info(&self) -> MintInfo {
+        let state = self.keyset_state.read().await;
+        let active_id = state.active_keyset_id.clone();
         MintInfo {
             name: self.config.mint.name.clone(),
-            pubkey,
+            pubkey: state.pubkey.clone(),
             version: format!("minerva-mint/{}", env!("CARGO_PKG_VERSION")),
             description: self.config.mint.description.clone(),
             contact: vec![],
-            motd: Some("Ark-backed mint scaffold — not production ready".into()),
+            motd: None,
             nuts: serde_json::json!({
-                "4": { "methods": [{"method": "bolt11", "unit": "sat"}], "disabled": false },
-                "5": { "methods": [{"method": "bolt11", "unit": "sat"}], "disabled": false },
+                "4": { "methods": [{"method": "bolt11", "unit": "sat", "id": active_id}], "disabled": false },
+                "5": { "methods": [{"method": "bolt11", "unit": "sat", "id": active_id}], "disabled": false },
             }),
         }
     }
@@ -262,7 +294,7 @@ impl MintBackend {
             quote.amount_sat
         };
 
-        let output_total = Self::validate_outputs(&req.outputs)?;
+        let output_total = self.validate_outputs(&req.outputs)?;
         if output_total != amount_sat {
             return Err(MintError::Unbalanced {
                 inputs: amount_sat,
@@ -308,6 +340,7 @@ impl MintBackend {
                 quote_state,
                 quote_expiry,
                 now: Self::now(),
+                keyset_id: &self.active_keyset_id(),
                 vtxo_id: Some(&mapping.vtxo_id),
             })?;
         }
@@ -463,6 +496,8 @@ impl MintBackend {
             .expect("quote exists")
             .state = QuoteState::Paid;
 
+        self.release_backing_for_melt(req.token_ids.as_ref(), input_total)?;
+
         Ok(MeltBolt11Response {
             quote: req.quote,
             state: QuoteState::Paid,
@@ -470,10 +505,54 @@ impl MintBackend {
         })
     }
 
+    fn release_backing_for_melt(
+        &self,
+        token_ids: Option<&Vec<String>>,
+        burned_sat: u64,
+    ) -> Result<()> {
+        if !self.config.trust.release_backing_on_melt && token_ids.is_none() {
+            return Ok(());
+        }
+        let burned_msat = burned_sat.saturating_mul(MSAT_PER_SAT);
+        if burned_msat == 0 {
+            return Ok(());
+        }
+
+        if let Some(ids) = token_ids {
+            let mut remaining = burned_msat;
+            for id in ids {
+                if remaining == 0 {
+                    break;
+                }
+                let released = self.inventory.release_vtxo_backing(id, remaining)?;
+                remaining = remaining.saturating_sub(released);
+            }
+            if remaining > 0 {
+                return Err(MintError::InvalidRequest(format!(
+                    "melt backing release short by {} msat for token_ids",
+                    remaining
+                )));
+            }
+            return Ok(());
+        }
+
+        if self.config.trust.release_backing_on_melt_fifo {
+            let released = self.inventory.deallocate_fifo(burned_msat)?;
+            if released < burned_msat {
+                tracing::warn!(
+                    released_msat = released,
+                    needed_msat = burned_msat,
+                    "FIFO melt backing release partial"
+                );
+            }
+        }
+        Ok(())
+    }
+
     // -- NUT-03: swap ---------------------------------------------------------
 
     pub async fn swap(&self, req: SwapRequest) -> Result<SwapResponse> {
-        let output_total = Self::validate_outputs(&req.outputs)?;
+        let output_total = self.validate_outputs(&req.outputs)?;
         // Verify before spending so an unbalanced request doesn't burn inputs.
         {
             let spent = self.spent_secrets.lock().unwrap();
@@ -497,6 +576,7 @@ impl MintBackend {
             self.policy.can_sign_swap(&SwapSignRequest {
                 input_total_sat: input_total,
                 outputs: &req.outputs,
+                keyset_id: &self.active_keyset_id(),
             })?;
         }
         self.verify_and_spend_inputs(&req.inputs)?;
@@ -581,7 +661,7 @@ impl MintBackend {
             mint_url: self.config.mint.url.clone(),
             version: format!("minerva-mint/{}", env!("CARGO_PKG_VERSION")),
             git_commit: option_env!("MINERVA_GIT_COMMIT").map(str::to_string),
-            active_keysets: vec![KEYSET_ID.to_string()],
+            active_keysets: vec![self.active_keyset_id()],
             vtxo_verify_mode: self.config.trust.vtxo_verify_mode.clone(),
             signatory_policy_enforced: self.policy_enforced,
             outstanding_ecash_sat: pol.outstanding_sat,
@@ -830,6 +910,7 @@ mod tests {
             .melt(MeltBolt11Request {
                 quote: melt_quote.quote.clone(),
                 inputs: new_proofs,
+                token_ids: None,
             })
             .await
             .unwrap();

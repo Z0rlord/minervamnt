@@ -163,12 +163,10 @@ become claimable. The `/ark/exit` response includes `phase` and `claim_txid`.
 
 ## Limitations (current)
 
-- **`/v1/info` pubkey** — still a scaffold placeholder unless you wire remote
-  signatory metadata.
-- **Melt VTXO unmapping** — melt does not carry the original mint quote id;
-  backing release is via `/ark/exit` or operator tooling.
-- **Arkade on signet** — use Second/barkd here; see [arkade-asp.md](arkade-asp.md)
-  for Arkade mainnet.
+- **PoL keyset id** — epoch roots still keyed to the scaffold id until CDK keyset rotation is wired through PoL.
+- **`/v1/info` pubkey** — served from signatory keyset cache at startup; restart mint after signatory key rotation.
+- **Melt backing** — pass `token_ids` (mint quote UUIDs) on `POST /v1/melt/bolt11`, or enable `release_backing_on_melt_fifo` in config.
+- **Arkade on signet** — use Second/barkd here; see [arkade-asp.md](arkade-asp.md) for Arkade mainnet.
 
 ## Troubleshooting
 

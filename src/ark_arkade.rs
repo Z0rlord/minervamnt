@@ -86,6 +86,13 @@ impl ArkClient for ArkadeArkClient {
         ark_service_get_info(&self.ark_config())
             .await
             .map_err(|e| MintError::Ark(format!("arkade get_info: {e}")))?;
+        if let Some(w) = &self.wallet {
+            if !w.wallet_connected().await? {
+                return Err(MintError::Ark(
+                    "arkade wallet daemon not connected to ASP".into(),
+                ));
+            }
+        }
         Ok(())
     }
 

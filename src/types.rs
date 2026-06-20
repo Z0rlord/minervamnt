@@ -173,6 +173,24 @@ pub struct MeltQuoteBolt11Response {
 pub struct MeltBolt11Request {
     pub quote: String,
     pub inputs: Vec<Proof>,
+    /// Mint quote UUIDs whose VTXO backing should be released on successful melt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_ids: Option<Vec<String>>,
+}
+
+/// NUT-02 keyset entry returned by `GET /v1/keysets`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeysetInfo {
+    pub id: String,
+    pub unit: String,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_fee_ppk: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeysetsResponse {
+    pub keysets: Vec<KeysetInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
