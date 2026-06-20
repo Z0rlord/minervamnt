@@ -10,6 +10,7 @@ use minerva_mint::blind_signer::build_blind_signer;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::ots::HttpOtsStamper;
 use minerva_mint::pol::PolLedger;
+use minerva_mint::spent_store::SpentSecretStore;
 use minerva_mint::tasks::{
     run_health_monitor, run_ots_upgrade_worker, run_pol_epoch_worker, run_refresh_scheduler,
 };
@@ -38,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(VtxoVerifyMode::Scaffold);
     let inventory = VtxoInventory::open_with_mode(&config.database.path, verify_mode)?;
     let pol = PolLedger::open(&config.database.path)?;
+    let spent = SpentSecretStore::open(&config.database.path)?;
 
     let ots: Option<Arc<dyn minerva_mint::ots::OtsStamper>> = if config.trust.ots.enabled {
         match HttpOtsStamper::new(config.trust.ots.calendar_urls.clone()) {
@@ -60,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         signer,
         inventory,
         pol,
+        spent,
         ots,
     ));
     backend.init_keysets().await?;
