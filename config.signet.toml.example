@@ -11,7 +11,7 @@ backend = "barkd"
 server_url = "https://ark.signet.2nd.dev"
 server_pubkey = ""
 barkd_url = "http://127.0.0.1:3535"
-poll_timeout_secs = 600
+poll_timeout_secs = 1200
 poll_interval_secs = 5
 # Signet ASP uses shorter VTXO lifetimes than mainnet.
 refresh_threshold_blocks = 72

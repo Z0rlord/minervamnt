@@ -13,7 +13,7 @@ pub fn decode_invoice(invoice_str: &str) -> Result<(u64, String)> {
 
     if !matches!(
         invoice.currency(),
-        Currency::Bitcoin | Currency::BitcoinTestnet | Currency::Regtest
+        Currency::Bitcoin | Currency::BitcoinTestnet | Currency::Regtest | Currency::Signet
     ) {
         return Err(MintError::InvalidRequest(format!(
             "unsupported invoice currency: {:?}",

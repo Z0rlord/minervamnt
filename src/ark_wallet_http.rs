@@ -3,6 +3,7 @@
 //! Both Second barkd and an Arkade operator wallet can expose a compatible REST
 //! surface for board / refresh / exit when configured via `wallet_url`.
 
+use crate::bolt11_util::decode_invoice;
 use crate::error::{MintError, Result};
 use crate::types::{ExitResult, Vtxo};
 use serde::{Deserialize, Serialize};
@@ -229,6 +230,7 @@ impl WalletHttpClient {
         if destination.trim().is_empty() {
             return Err(MintError::Ark("empty lightning destination".into()));
         }
+        let (_, payment_hash) = decode_invoice(destination)?;
         let body = LightningPayRequest {
             destination: destination.to_string(),
             amount_sat: None,
@@ -239,10 +241,141 @@ impl WalletHttpClient {
         if let Some(preimage) = extract_preimage(&resp) {
             return Ok(preimage);
         }
-        self.poll_lightning_preimage(destination, amount_sat).await
+        match self.poll_lightning_pay_status(&payment_hash).await {
+            Ok(preimage) => Ok(preimage),
+            Err(e) => {
+                tracing::debug!(
+                    payment_hash = %payment_hash,
+                    "pay status poll unavailable, falling back to history: {e}"
+                );
+                self.poll_lightning_preimage(destination, amount_sat, Some(&payment_hash))
+                    .await
+            }
+        }
     }
 
-    async fn poll_lightning_preimage(&self, destination: &str, amount_sat: u64) -> Result<String> {
+    async fn poll_lightning_pay_status(&self, payment_hash: &str) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + self.poll_timeout;
+        let mut status_api_available = true;
+        loop {
+            let _: Result<serde_json::Value> = self
+                .post_json(
+                    &format!("{API_PREFIX}/wallet/sync"),
+                    &serde_json::json!({}),
+                )
+                .await;
+
+            if status_api_available {
+                match self
+                    .get_json::<LightningPayStatus>(&format!(
+                        "{API_PREFIX}/lightning/pay/status/{payment_hash}"
+                    ))
+                    .await
+                {
+                    Ok(status) => {
+                        if let Some(preimage) = status.preimage.filter(|p| !p.is_empty()) {
+                            return Ok(preimage);
+                        }
+                        if lightning_payment_succeeded(&status.state) {
+                            if let Ok(preimage) = self
+                                .poll_history_for_preimage(payment_hash, None)
+                                .await
+                            {
+                                return Ok(preimage);
+                            }
+                        }
+                        if status.state == "failed" {
+                            return Err(MintError::Ark(format!(
+                                "lightning payment {payment_hash} failed"
+                            )));
+                        }
+                    }
+                    Err(MintError::Ark(msg)) if msg.contains("path not round") => {
+                        status_api_available = false;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            if let Ok(preimage) = self
+                .poll_history_for_preimage(payment_hash, None)
+                .await
+            {
+                return Ok(preimage);
+            }
+            if let Ok(PaymentOutcome::Failed) = self
+                .poll_payment_outcome(payment_hash, None)
+                .await
+            {
+                return Err(MintError::Ark(format!(
+                    "lightning payment {payment_hash} failed"
+                )));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MintError::Ark(format!(
+                    "timed out waiting for lightning payment status ({payment_hash})"
+                )));
+            }
+            tokio::time::sleep(self.poll_interval).await;
+        }
+    }
+
+    async fn poll_history_for_preimage(
+        &self,
+        payment_hash: &str,
+        destination: Option<&str>,
+    ) -> Result<String> {
+        match self
+            .poll_payment_outcome(payment_hash, destination)
+            .await?
+        {
+            PaymentOutcome::Succeeded(preimage) => Ok(preimage),
+            PaymentOutcome::Failed => Err(MintError::Ark(format!(
+                "lightning payment {payment_hash} failed"
+            ))),
+            PaymentOutcome::Pending => Err(MintError::Ark("payment not yet in history".into())),
+        }
+    }
+
+    async fn poll_payment_outcome(
+        &self,
+        payment_hash: &str,
+        destination: Option<&str>,
+    ) -> Result<PaymentOutcome> {
+        let movements: Vec<serde_json::Value> =
+            self.get_json(&format!("{API_PREFIX}/history")).await?;
+        for movement in movements.iter().rev() {
+            let md_hash = movement
+                .get("metadata")
+                .and_then(|m| m.get("payment_hash"))
+                .and_then(|h| h.as_str());
+            let hash_match = md_hash.is_some_and(|h| payment_hashes_match(h, payment_hash));
+            let dest_match = destination
+                .map(|dest| movement_matches_destination(movement, dest))
+                .unwrap_or(false);
+            if !hash_match && !dest_match {
+                continue;
+            }
+            match movement.get("status").and_then(|s| s.as_str()) {
+                Some("failed") => return Ok(PaymentOutcome::Failed),
+                Some("successful") => {
+                    if let Some(preimage) = extract_preimage_from_movement(movement) {
+                        return Ok(PaymentOutcome::Succeeded(preimage));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(PaymentOutcome::Pending)
+    }
+
+    async fn poll_lightning_preimage(
+        &self,
+        destination: &str,
+        amount_sat: u64,
+        payment_hash: Option<&str>,
+    ) -> Result<String> {
         let deadline = tokio::time::Instant::now() + self.poll_timeout;
         loop {
             let _: Result<serde_json::Value> = self
@@ -252,18 +385,20 @@ impl WalletHttpClient {
                 )
                 .await;
 
-            let movements: Vec<serde_json::Value> =
-                self.get_json(&format!("{API_PREFIX}/history")).await?;
-            for movement in &movements {
-                if movement.get("status").and_then(|s| s.as_str()) != Some("successful") {
-                    continue;
+            if let Some(hash) = payment_hash {
+                match self.poll_payment_outcome(hash, Some(destination)).await? {
+                    PaymentOutcome::Succeeded(preimage) => return Ok(preimage),
+                    PaymentOutcome::Failed => {
+                        return Err(MintError::Ark(format!(
+                            "lightning payment {hash} failed"
+                        )));
+                    }
+                    PaymentOutcome::Pending => {}
                 }
-                if !movement_matches_destination(movement, destination) {
-                    continue;
-                }
-                if let Some(preimage) = extract_preimage_from_movement(movement) {
-                    return Ok(preimage);
-                }
+            } else if let Ok(preimage) =
+                self.poll_history_by_destination(destination).await
+            {
+                return Ok(preimage);
             }
 
             if tokio::time::Instant::now() >= deadline {
@@ -273,6 +408,23 @@ impl WalletHttpClient {
             }
             tokio::time::sleep(self.poll_interval).await;
         }
+    }
+
+    async fn poll_history_by_destination(&self, destination: &str) -> Result<String> {
+        let movements: Vec<serde_json::Value> =
+            self.get_json(&format!("{API_PREFIX}/history")).await?;
+        for movement in movements.iter().rev() {
+            if movement.get("status").and_then(|s| s.as_str()) != Some("successful") {
+                continue;
+            }
+            if !movement_matches_destination(movement, destination) {
+                continue;
+            }
+            if let Some(preimage) = extract_preimage_from_movement(movement) {
+                return Ok(preimage);
+            }
+        }
+        Err(MintError::Ark("payment not yet in history".into()))
     }
 
     async fn fetch_vtxo(&self, id: &str) -> Result<WalletVtxoInfo> {
@@ -405,6 +557,17 @@ fn extract_claim_txid(status: &ExitTransactionStatus) -> Option<String> {
         .or_else(|| status.txid.clone())
 }
 
+enum PaymentOutcome {
+    Succeeded(String),
+    Failed,
+    Pending,
+}
+
+fn payment_hashes_match(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim().trim_start_matches("0x").to_ascii_lowercase();
+    norm(a) == norm(b)
+}
+
 fn extract_preimage(value: &serde_json::Value) -> Option<String> {
     for key in ["preimage", "payment_preimage", "paymentPreimage"] {
         if let Some(s) = value.get(key).and_then(|v| v.as_str()) {
@@ -425,6 +588,13 @@ fn extract_preimage_from_movement(movement: &serde_json::Value) -> Option<String
         .and_then(|m| extract_preimage(m))
 }
 
+fn lightning_payment_succeeded(state: &str) -> bool {
+    matches!(
+        state,
+        "successful" | "payment-successful" | "paid" | "completed"
+    ) || state.contains("success")
+}
+
 fn movement_matches_destination(movement: &serde_json::Value, destination: &str) -> bool {
     let dest_norm = destination.trim();
     if let Some(sent_to) = movement.get("sent_to").and_then(|v| v.as_array()) {
@@ -432,6 +602,14 @@ fn movement_matches_destination(movement: &serde_json::Value, destination: &str)
             if entry
                 .get("destination")
                 .and_then(|d| d.as_str())
+                .is_some_and(|d| d.trim() == dest_norm)
+            {
+                return true;
+            }
+            if entry
+                .get("destination")
+                .and_then(|d| d.get("value"))
+                .and_then(|v| v.as_str())
                 .is_some_and(|d| d.trim() == dest_norm)
             {
                 return true;
@@ -459,12 +637,20 @@ struct FeeEstimateResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct LightningPayStatus {
+    state: String,
+    #[serde(default)]
+    preimage: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ConnectedResponse {
     connected: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct BlockTip {
+    #[serde(alias = "tip_height")]
     height: u64,
 }
 
