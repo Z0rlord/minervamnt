@@ -323,6 +323,7 @@ pub struct TransparencySummary {
 /// `GET /v1/pol/status`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolStatusResponse {
+    pub active_keyset_id: String,
     pub current_epoch_day: String,
     pub open_mint_total_sat: u64,
     pub open_burn_total_sat: u64,

@@ -4,7 +4,6 @@
 //! with daily epoch closure, chained root hashes, and OpenTimestamps storage.
 
 use crate::error::{MintError, Result};
-use crate::types::KEYSET_ID;
 use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -142,6 +141,7 @@ impl PolLedger {
     /// Log a successful mint (blind signature issuance).
     pub fn record_mint(
         &self,
+        keyset_id: &str,
         quote_id: &str,
         amount_sat: u64,
         outputs_b: &[String],
@@ -158,7 +158,7 @@ impl PolLedger {
             "INSERT INTO pol_mint_events (keyset_id, quote_id, amount_sat, b_hash, created_at, epoch_day)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
-                KEYSET_ID,
+                keyset_id,
                 quote_id,
                 amount_sat as i64,
                 b_hash,
@@ -170,7 +170,7 @@ impl PolLedger {
     }
 
     /// Log a burn (secret spent in melt or swap).
-    pub fn record_burn(&self, secret: &str, amount_sat: u64) -> Result<()> {
+    pub fn record_burn(&self, keyset_id: &str, secret: &str, amount_sat: u64) -> Result<()> {
         let epoch_day = Self::current_epoch_day();
         let secret_hash = Self::hash_leaf("burn", secret);
         let conn = self.conn.lock().unwrap();
@@ -178,7 +178,7 @@ impl PolLedger {
             "INSERT INTO pol_burn_events (keyset_id, secret_hash, amount_sat, created_at, epoch_day)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                KEYSET_ID,
+                keyset_id,
                 secret_hash,
                 amount_sat as i64,
                 Self::now() as i64,
@@ -188,40 +188,42 @@ impl PolLedger {
         Ok(())
     }
 
-    fn open_totals(&self, epoch_day: &str) -> Result<(u64, u64)> {
+    fn open_totals(&self, epoch_day: &str, keyset_id: &str) -> Result<(u64, u64)> {
         let conn = self.conn.lock().unwrap();
         let mint: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events WHERE epoch_day = ?1",
-            params![epoch_day],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events
+             WHERE epoch_day = ?1 AND keyset_id = ?2",
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )?;
         let burn: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events WHERE epoch_day = ?1",
-            params![epoch_day],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events
+             WHERE epoch_day = ?1 AND keyset_id = ?2",
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )?;
         Ok((mint.max(0) as u64, burn.max(0) as u64))
     }
 
-    fn cumulative_outstanding(&self) -> Result<u64> {
+    fn cumulative_outstanding(&self, keyset_id: &str) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let mint: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events",
-            [],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events WHERE keyset_id = ?1",
+            params![keyset_id],
             |r| r.get(0),
         )?;
         let burn: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events",
-            [],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events WHERE keyset_id = ?1",
+            params![keyset_id],
             |r| r.get(0),
         )?;
         Ok(mint.saturating_sub(burn).max(0) as u64)
     }
 
-    pub fn status(&self) -> Result<PolStatus> {
+    pub fn status(&self, keyset_id: &str) -> Result<PolStatus> {
         let epoch_day = Self::current_epoch_day();
-        let (open_mint, open_burn) = self.open_totals(&epoch_day)?;
-        let outstanding = self.cumulative_outstanding()?;
+        let (open_mint, open_burn) = self.open_totals(&epoch_day, keyset_id)?;
+        let outstanding = self.cumulative_outstanding(keyset_id)?;
 
         let conn = self.conn.lock().unwrap();
         let last: Option<(String, String)> = conn
@@ -229,7 +231,7 @@ impl PolLedger {
                 "SELECT epoch_day, root_hash FROM pol_epochs
                  WHERE status = 'closed' AND keyset_id = ?1
                  ORDER BY closed_at DESC LIMIT 1",
-                params![KEYSET_ID],
+                params![keyset_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -239,7 +241,7 @@ impl PolLedger {
                 "SELECT epoch_day, ots_stamped_at FROM pol_epochs
                  WHERE keyset_id = ?1 AND ots_proof_hex IS NOT NULL
                  ORDER BY ots_stamped_at DESC LIMIT 1",
-                params![KEYSET_ID],
+                params![keyset_id],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
@@ -259,12 +261,12 @@ impl PolLedger {
     /// Close the given UTC epoch day and compute a chained root hash.
     ///
     /// Idempotent: already-closed epochs are skipped.
-    pub fn close_epoch(&self, epoch_day: &str) -> Result<Option<PolEpochRoot>> {
+    pub fn close_epoch(&self, epoch_day: &str, keyset_id: &str) -> Result<Option<PolEpochRoot>> {
         let conn = self.conn.lock().unwrap();
         let already: Option<String> = conn
             .query_row(
                 "SELECT status FROM pol_epochs WHERE epoch_day = ?1 AND keyset_id = ?2",
-                params![epoch_day, KEYSET_ID],
+                params![epoch_day, keyset_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -273,23 +275,29 @@ impl PolLedger {
         }
 
         let mint_total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events WHERE epoch_day = ?1",
-            params![epoch_day],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_mint_events
+             WHERE epoch_day = ?1 AND keyset_id = ?2",
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )?;
         let burn_total: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events WHERE epoch_day = ?1",
-            params![epoch_day],
+            "SELECT COALESCE(SUM(amount_sat), 0) FROM pol_burn_events
+             WHERE epoch_day = ?1 AND keyset_id = ?2",
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )?;
 
         let mut event_hashes: Vec<String> = conn
             .prepare(
-                "SELECT quote_id || ':' || amount_sat FROM pol_mint_events WHERE epoch_day = ?1
+                "SELECT quote_id || ':' || amount_sat FROM pol_mint_events
+                 WHERE epoch_day = ?1 AND keyset_id = ?2
                  UNION ALL
-                 SELECT 'burn:' || secret_hash || ':' || amount_sat FROM pol_burn_events WHERE epoch_day = ?1",
+                 SELECT 'burn:' || secret_hash || ':' || amount_sat FROM pol_burn_events
+                 WHERE epoch_day = ?1 AND keyset_id = ?2",
             )?
-            .query_map(params![epoch_day], |r| r.get::<_, String>(0))?
+            .query_map(params![epoch_day, keyset_id], |r| {
+                r.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         event_hashes.sort();
 
@@ -307,7 +315,7 @@ impl PolLedger {
                 "SELECT root_hash FROM pol_epochs
                  WHERE status = 'closed' AND keyset_id = ?1
                  ORDER BY closed_at DESC LIMIT 1",
-                params![KEYSET_ID],
+                params![keyset_id],
                 |r| r.get(0),
             )
             .optional()?;
@@ -319,7 +327,7 @@ impl PolLedger {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'closed')",
             params![
                 epoch_day,
-                KEYSET_ID,
+                keyset_id,
                 mint_total,
                 burn_total,
                 root_hash,
@@ -330,7 +338,7 @@ impl PolLedger {
 
         Ok(Some(PolEpochRoot {
             epoch_day: epoch_day.to_string(),
-            keyset_id: KEYSET_ID.to_string(),
+            keyset_id: keyset_id.to_string(),
             mint_total_sat: mint_total.max(0) as u64,
             burn_total_sat: burn_total.max(0) as u64,
             outstanding_sat: (mint_total - burn_total).max(0) as u64,
@@ -342,23 +350,23 @@ impl PolLedger {
         }))
     }
 
-    pub fn epoch_root_hash(&self, epoch_day: &str) -> Result<Option<String>> {
+    pub fn epoch_root_hash(&self, epoch_day: &str, keyset_id: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT root_hash FROM pol_epochs WHERE epoch_day = ?1 AND keyset_id = ?2",
-            params![epoch_day, KEYSET_ID],
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )
         .optional()
         .map_err(Into::into)
     }
 
-    pub fn has_ots_stamp(&self, epoch_day: &str) -> Result<bool> {
+    pub fn has_ots_stamp(&self, epoch_day: &str, keyset_id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(
             "SELECT COUNT(1) FROM pol_epochs
              WHERE epoch_day = ?1 AND keyset_id = ?2 AND ots_proof_hex IS NOT NULL",
-            params![epoch_day, KEYSET_ID],
+            params![epoch_day, keyset_id],
             |r| r.get(0),
         )?;
         Ok(n > 0)
@@ -367,6 +375,7 @@ impl PolLedger {
     pub fn save_ots_stamp(
         &self,
         epoch_day: &str,
+        keyset_id: &str,
         proof_hex: &str,
         calendar_url: &str,
     ) -> Result<()> {
@@ -379,7 +388,7 @@ impl PolLedger {
                 calendar_url,
                 Self::now() as i64,
                 epoch_day,
-                KEYSET_ID,
+                keyset_id,
             ],
         )?;
         if n == 0 {
@@ -391,14 +400,14 @@ impl PolLedger {
     }
 
     /// Closed epochs that do not yet have an OTS proof attached.
-    pub fn epochs_pending_ots(&self) -> Result<Vec<String>> {
+    pub fn epochs_pending_ots(&self, keyset_id: &str) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT epoch_day FROM pol_epochs
              WHERE keyset_id = ?1 AND status = 'closed' AND ots_proof_hex IS NULL
              ORDER BY closed_at ASC",
         )?;
-        let rows = stmt.query_map(params![KEYSET_ID], |r| r.get(0))?;
+        let rows = stmt.query_map(params![keyset_id], |r| r.get(0))?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -406,12 +415,12 @@ impl PolLedger {
         Ok(out)
     }
 
-    pub fn ots_proof(&self, epoch_day: &str) -> Result<Option<(String, String)>> {
+    pub fn ots_proof(&self, epoch_day: &str, keyset_id: &str) -> Result<Option<(String, String)>> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT ots_proof_hex, ots_calendar_url FROM pol_epochs
              WHERE epoch_day = ?1 AND keyset_id = ?2 AND ots_proof_hex IS NOT NULL",
-            params![epoch_day, KEYSET_ID],
+            params![epoch_day, keyset_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()
@@ -419,11 +428,6 @@ impl PolLedger {
     }
 
     pub fn roots_for_keyset(&self, keyset_id: &str) -> Result<Vec<PolEpochRoot>> {
-        if keyset_id != KEYSET_ID {
-            return Err(MintError::InvalidRequest(format!(
-                "unknown keyset_id: {keyset_id}"
-            )));
-        }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT epoch_day, keyset_id, mint_total, burn_total, root_hash, prev_hash,
@@ -459,15 +463,18 @@ impl PolLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::KEYSET_ID;
 
     #[test]
     fn mint_and_burn_update_outstanding() {
         let pol = PolLedger::open_in_memory().unwrap();
-        pol.record_mint("q1", 100, &["02b1".into()]).unwrap();
-        pol.record_mint("q2", 50, &["02b2".into()]).unwrap();
-        pol.record_burn("secret-a", 30).unwrap();
+        pol.record_mint(KEYSET_ID, "q1", 100, &["02b1".into()])
+            .unwrap();
+        pol.record_mint(KEYSET_ID, "q2", 50, &["02b2".into()])
+            .unwrap();
+        pol.record_burn(KEYSET_ID, "secret-a", 30).unwrap();
 
-        let s = pol.status().unwrap();
+        let s = pol.status(KEYSET_ID).unwrap();
         assert_eq!(s.outstanding_sat, 120);
         assert_eq!(s.open_mint_total_sat, 150);
         assert_eq!(s.open_burn_total_sat, 30);
@@ -477,15 +484,15 @@ mod tests {
     fn close_epoch_produces_root_and_chains() {
         let pol = PolLedger::open_in_memory().unwrap();
         let day = PolLedger::current_epoch_day();
-        pol.record_mint("q1", 64, &["02b".into()]).unwrap();
+        pol.record_mint(KEYSET_ID, "q1", 64, &["02b".into()]).unwrap();
 
-        let closed = pol.close_epoch(&day).unwrap().expect("epoch closed");
+        let closed = pol.close_epoch(&day, KEYSET_ID).unwrap().expect("epoch closed");
         assert_eq!(closed.mint_total_sat, 64);
         assert_eq!(closed.burn_total_sat, 0);
         assert_eq!(closed.root_hash.len(), 64);
 
         // Second close is idempotent.
-        assert!(pol.close_epoch(&day).unwrap().is_none());
+        assert!(pol.close_epoch(&day, KEYSET_ID).unwrap().is_none());
 
         let roots = pol.roots_for_keyset(KEYSET_ID).unwrap();
         assert_eq!(roots.len(), 1);
@@ -494,32 +501,51 @@ mod tests {
     #[test]
     fn duplicate_mint_quote_rejected() {
         let pol = PolLedger::open_in_memory().unwrap();
-        pol.record_mint("q1", 10, &[]).unwrap();
-        assert!(pol.record_mint("q1", 10, &[]).is_err());
+        pol.record_mint(KEYSET_ID, "q1", 10, &[]).unwrap();
+        assert!(pol.record_mint(KEYSET_ID, "q1", 10, &[]).is_err());
     }
 
     #[test]
     fn save_ots_stamp_on_closed_epoch() {
         let pol = PolLedger::open_in_memory().unwrap();
         let day = PolLedger::current_epoch_day();
-        pol.record_mint("q1", 10, &[]).unwrap();
-        pol.close_epoch(&day).unwrap();
+        pol.record_mint(KEYSET_ID, "q1", 10, &[]).unwrap();
+        pol.close_epoch(&day, KEYSET_ID).unwrap();
 
-        pol.save_ots_stamp(&day, "deadbeef", "https://a.pool.opentimestamps.org")
-            .unwrap();
-        assert!(pol.has_ots_stamp(&day).unwrap());
-        let (proof, cal) = pol.ots_proof(&day).unwrap().unwrap();
+        pol.save_ots_stamp(
+            &day,
+            KEYSET_ID,
+            "deadbeef",
+            "https://a.pool.opentimestamps.org",
+        )
+        .unwrap();
+        assert!(pol.has_ots_stamp(&day, KEYSET_ID).unwrap());
+        let (proof, cal) = pol.ots_proof(&day, KEYSET_ID).unwrap().unwrap();
         assert_eq!(proof, "deadbeef");
         assert!(cal.contains("opentimestamps"));
+    }
+
+    #[test]
+    fn separate_keysets_have_independent_outstanding() {
+        let pol = PolLedger::open_in_memory().unwrap();
+        pol.record_mint(KEYSET_ID, "q1", 40, &[]).unwrap();
+        pol.record_mint("00remotekeyset01", "q2", 25, &[]).unwrap();
+        pol.record_burn(KEYSET_ID, "s1", 10).unwrap();
+
+        assert_eq!(pol.status(KEYSET_ID).unwrap().outstanding_sat, 30);
+        assert_eq!(
+            pol.status("00remotekeyset01").unwrap().outstanding_sat,
+            25
+        );
     }
 
     #[test]
     fn epochs_pending_ots_lists_unstamped() {
         let pol = PolLedger::open_in_memory().unwrap();
         let day = PolLedger::current_epoch_day();
-        pol.close_epoch(&day).unwrap();
-        assert_eq!(pol.epochs_pending_ots().unwrap(), vec![day.clone()]);
-        pol.save_ots_stamp(&day, "aa", "mock://ots").unwrap();
-        assert!(pol.epochs_pending_ots().unwrap().is_empty());
+        pol.close_epoch(&day, KEYSET_ID).unwrap();
+        assert_eq!(pol.epochs_pending_ots(KEYSET_ID).unwrap(), vec![day.clone()]);
+        pol.save_ots_stamp(&day, KEYSET_ID, "aa", "mock://ots").unwrap();
+        assert!(pol.epochs_pending_ots(KEYSET_ID).unwrap().is_empty());
     }
 }

@@ -332,3 +332,96 @@ async fn invalid_requests_are_rejected() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn melt_releases_vtxo_backing_with_token_ids() {
+    let mut config: AppConfig =
+        toml::from_str(include_str!("../config.toml")).expect("config parses");
+    config.trust.release_backing_on_melt = true;
+
+    let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+    let signer = build_blind_signer(&config.signatory).expect("signer");
+    let backend = Arc::new(MintBackend::new(
+        config,
+        ark,
+        signer,
+        VtxoInventory::open_in_memory().unwrap(),
+        PolLedger::open_in_memory().unwrap(),
+        None,
+    ));
+    let app = router(backend);
+
+    let (_, quote_a) = request(
+        &app,
+        "POST",
+        "/v1/mint/quote/bolt11",
+        Some(json!({ "amount": 64, "unit": "sat" })),
+    )
+    .await;
+    let quote_a_id = quote_a["quote"].as_str().unwrap().to_string();
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/v1/mint/bolt11",
+        Some(json!({
+            "quote": quote_a_id,
+            "outputs": [{ "amount": 64, "id": KEYSET_ID, "B_": "02blinded-keep" }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, quote_b) = request(
+        &app,
+        "POST",
+        "/v1/mint/quote/bolt11",
+        Some(json!({ "amount": 512, "unit": "sat" })),
+    )
+    .await;
+    let quote_b_id = quote_b["quote"].as_str().unwrap().to_string();
+    let (status, minted_b) = request(
+        &app,
+        "POST",
+        "/v1/mint/bolt11",
+        Some(json!({
+            "quote": quote_b_id,
+            "outputs": [{ "amount": 512, "id": KEYSET_ID, "B_": "02blinded-melt" }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, melt_quote) = request(
+        &app,
+        "POST",
+        "/v1/melt/quote/bolt11",
+        Some(json!({ "request": "lnbc1", "unit": "sat" })),
+    )
+    .await;
+    let melt_quote_id = melt_quote["quote"].as_str().unwrap().to_string();
+    let sig = &minted_b["signatures"][0];
+
+    let (status, melted) = request(
+        &app,
+        "POST",
+        "/v1/melt/bolt11",
+        Some(json!({
+            "quote": melt_quote_id,
+            "inputs": [{
+                "amount": 512, "id": KEYSET_ID,
+                "secret": "secret-melt", "C": sig["C_"],
+            }],
+            "token_ids": [quote_b_id.clone()],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(melted["state"], "PAID");
+
+    let (status, _) = request(&app, "GET", &format!("/ark/vtxo/{quote_b_id}"), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, kept) = request(&app, "GET", &format!("/ark/vtxo/{quote_a_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(kept["status"], "active");
+}
