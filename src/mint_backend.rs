@@ -21,10 +21,11 @@ use crate::keyset_cache::MintKeysetState;
 use crate::ots::{digest_from_root_hex, OtsStamper};
 use crate::pol::PolLedger;
 use crate::signatory::{DefaultSignatoryPolicy, MintSignRequest, SignatoryPolicy, SwapSignRequest};
+use crate::spent_store::SpentSecretStore;
 use crate::types::*;
 use crate::vtxo_inventory::VtxoInventory;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -64,9 +65,7 @@ pub struct MintBackend {
     keyset_state: RwLock<MintKeysetState>,
     mint_quotes: Mutex<HashMap<String, MintQuote>>,
     melt_quotes: Mutex<HashMap<String, MeltQuote>>,
-    /// Spent proof secrets (double-spend guard). In-memory for the scaffold;
-    /// production must persist this alongside the keyset DB.
-    spent_secrets: Mutex<HashSet<String>>,
+    spent: SpentSecretStore,
 }
 
 impl MintBackend {
@@ -76,6 +75,7 @@ impl MintBackend {
         signer: Arc<dyn BlindSigner>,
         inventory: VtxoInventory,
         pol: PolLedger,
+        spent: SpentSecretStore,
         ots: Option<Arc<dyn OtsStamper>>,
     ) -> Self {
         let policy = DefaultSignatoryPolicy::new(config.trust.max_mint_sat);
@@ -88,10 +88,10 @@ impl MintBackend {
             ark,
             signer,
             inventory,
+            spent,
             keyset_state: RwLock::new(MintKeysetState::mock_default()),
             mint_quotes: Mutex::new(HashMap::new()),
             melt_quotes: Mutex::new(HashMap::new()),
-            spent_secrets: Mutex::new(HashSet::new()),
         }
     }
 
@@ -184,17 +184,12 @@ impl MintBackend {
         if self.config.signatory.backend != "mock" {
             self.signer.verify_proofs(inputs).await?;
         }
-        let mut spent = self.spent_secrets.lock().unwrap();
-        for p in inputs {
-            if spent.contains(&p.secret) {
-                return Err(MintError::TokenAlreadySpent);
-            }
+        let secrets: Vec<String> = inputs.iter().map(|p| p.secret.clone()).collect();
+        if self.spent.any_spent(&secrets)? {
+            return Err(MintError::TokenAlreadySpent);
         }
-        let total: u64 = inputs.iter().map(|p| p.amount).sum();
-        for p in inputs {
-            spent.insert(p.secret.clone());
-        }
-        Ok(total)
+        self.spent.mark_spent_batch(&keyset_id, inputs)?;
+        Ok(inputs.iter().map(|p| p.amount).sum())
     }
 
     fn record_melt_burns(&self, inputs: &[Proof]) -> Result<()> {
@@ -565,11 +560,9 @@ impl MintBackend {
         let output_total = self.validate_outputs(&req.outputs)?;
         // Verify before spending so an unbalanced request doesn't burn inputs.
         {
-            let spent = self.spent_secrets.lock().unwrap();
-            for p in &req.inputs {
-                if spent.contains(&p.secret) {
-                    return Err(MintError::TokenAlreadySpent);
-                }
+            let secrets: Vec<String> = req.inputs.iter().map(|p| p.secret.clone()).collect();
+            if self.spent.any_spent(&secrets)? {
+                return Err(MintError::TokenAlreadySpent);
             }
         }
         let input_total: u64 = req.inputs.iter().map(|p| p.amount).sum();
@@ -795,6 +788,7 @@ mod tests {
     use super::*;
     use crate::ark_client::MockArkClient;
     use crate::blind_signer::build_blind_signer;
+    use crate::spent_store::SpentSecretStore;
 
     fn test_config() -> AppConfig {
         let raw = include_str!("../config.toml");
@@ -807,7 +801,8 @@ mod tests {
         let signer = build_blind_signer(&config.signatory).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
-        MintBackend::new(config, ark, signer, inventory, pol, None)
+        let spent = SpentSecretStore::open_in_memory().unwrap();
+        MintBackend::new(config, ark, signer, inventory, pol, spent, None)
     }
 
     /// Decompose `amount` into powers of two per NUT-00. `tag` keeps blinded
@@ -1038,6 +1033,7 @@ mod tests {
             signer,
             VtxoInventory::open_in_memory().unwrap(),
             PolLedger::open_in_memory().unwrap(),
+            SpentSecretStore::open_in_memory().unwrap(),
             None,
         );
 
@@ -1094,18 +1090,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spent_secrets_persist_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mint.sqlite");
+        let config = test_config();
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+
+        let b = MintBackend::new(
+            config.clone(),
+            ark.clone(),
+            signer.clone(),
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        );
+
+        let quote = b
+            .mint_quote(MintQuoteBolt11Request {
+                amount: 64,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let minted = b
+            .mint(MintBolt11Request {
+                quote: quote.quote,
+                outputs: outputs_for(64, "persist"),
+            })
+            .await
+            .unwrap();
+        let proofs = proofs_from(&minted.signatures);
+
+        b.swap(SwapRequest {
+            inputs: proofs.clone(),
+            outputs: outputs_for(64, "persist2"),
+        })
+        .await
+        .unwrap();
+
+        drop(b);
+
+        let b2 = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        );
+        let err = b2
+            .swap(SwapRequest {
+                inputs: proofs,
+                outputs: outputs_for(64, "replay"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::TokenAlreadySpent));
+    }
+
+    #[tokio::test]
     async fn stamp_epoch_ots_with_mock() {
         let config = test_config();
         let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
         let signer = build_blind_signer(&config.signatory).unwrap();
+        let spent = SpentSecretStore::open_in_memory().unwrap();
         let b = MintBackend::new(
             config,
             ark,
             signer,
             inventory,
             pol,
+            spent,
             Some(Arc::new(crate::ots::MockOtsStamper)),
         );
         let day = PolLedger::current_epoch_day();

@@ -14,6 +14,7 @@ use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::blind_signer::build_blind_signer;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::pol::PolLedger;
+use minerva_mint::spent_store::SpentSecretStore;
 use minerva_mint::vtxo_inventory::VtxoInventory;
 use minerva_mint::AppConfig;
 use minerva_mint::KEYSET_ID;
@@ -28,6 +29,7 @@ fn test_backend() -> Arc<MintBackend> {
         signer,
         VtxoInventory::open_in_memory().unwrap(),
         PolLedger::open_in_memory().unwrap(),
+        SpentSecretStore::open_in_memory().unwrap(),
         None,
     ))
 }
@@ -347,6 +349,7 @@ async fn melt_releases_vtxo_backing_with_token_ids() {
         signer,
         VtxoInventory::open_in_memory().unwrap(),
         PolLedger::open_in_memory().unwrap(),
+        SpentSecretStore::open_in_memory().unwrap(),
         None,
     ));
     let app = router(backend);
