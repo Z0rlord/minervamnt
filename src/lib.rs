@@ -20,6 +20,7 @@ pub mod mint_backend;
 pub mod ots;
 pub mod pol;
 pub mod signatory;
+pub mod spent_store;
 pub mod tasks;
 pub mod types;
 pub mod vtxo_inventory;
