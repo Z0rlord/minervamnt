@@ -93,7 +93,7 @@ pub async fn run_pol_epoch_worker(backend: Arc<MintBackend>, interval: Duration)
         ticker.tick().await;
         let day = PolLedger::current_epoch_day();
         if day != last_day {
-            match backend.pol().close_epoch(&last_day) {
+            match backend.pol().close_epoch(&last_day, &backend.active_keyset_id()) {
                 Ok(Some(_)) => {
                     tracing::info!(epoch = %last_day, "PoL epoch closed");
                     if let Err(e) = backend.stamp_epoch_ots(&last_day).await {

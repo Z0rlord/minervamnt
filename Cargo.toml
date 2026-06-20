@@ -10,10 +10,11 @@ readme = "README.md"
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["macros"] }
-cdk-common = "0.17.0-rc.3"
-cdk-signatory = { version = "0.17.0-rc.3", default-features = false, features = ["grpc"] }
+cdk-common = "0.17.1"
+cdk-signatory = { version = "0.17.1", default-features = false, features = ["grpc"] }
 dotenvy = "0.15"
 hex = "0.4"
+jsonwebtoken = "10.4"
 k256 = { version = "0.13", features = ["ecdsa", "schnorr"] }
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
