@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         pol,
         ots,
     ));
+    backend.init_keysets().await?;
 
     tokio::spawn(run_refresh_scheduler(
         backend.clone(),

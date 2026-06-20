@@ -16,6 +16,7 @@ pub struct MintSignRequest<'a> {
     pub quote_state: QuoteState,
     pub quote_expiry: u64,
     pub now: u64,
+    pub keyset_id: &'a str,
     /// VTXO id from `allocate_vtxo_for_tokens`, if allocation succeeded.
     pub vtxo_id: Option<&'a str>,
 }
@@ -25,6 +26,7 @@ pub struct MintSignRequest<'a> {
 pub struct SwapSignRequest<'a> {
     pub input_total_sat: u64,
     pub outputs: &'a [BlindedMessage],
+    pub keyset_id: &'a str,
 }
 
 /// Gate between mint logic and the signatory (local mock or remote CDK).
@@ -45,16 +47,20 @@ impl DefaultSignatoryPolicy {
 }
 
 impl DefaultSignatoryPolicy {
-    fn validate_outputs(outputs: &[BlindedMessage], expected_total: u64) -> Result<()> {
+    fn validate_outputs(
+        outputs: &[BlindedMessage],
+        expected_total: u64,
+        keyset_id: &str,
+    ) -> Result<()> {
         if outputs.is_empty() {
             return Err(MintError::InvalidRequest("no outputs for signing".into()));
         }
         let mut total = 0u64;
         for o in outputs {
-            if o.id != KEYSET_ID {
+            if o.id != keyset_id {
                 return Err(MintError::InvalidRequest(format!(
-                    "signing rejected: unknown keyset {}",
-                    o.id
+                    "signing rejected: unknown keyset {} (active {})",
+                    o.id, keyset_id
                 )));
             }
             if !o.amount.is_power_of_two() {
@@ -86,7 +92,7 @@ impl SignatoryPolicy for DefaultSignatoryPolicy {
                 req.quote_id
             )));
         }
-        Self::validate_outputs(req.outputs, req.amount_sat)?;
+        Self::validate_outputs(req.outputs, req.amount_sat, req.keyset_id)?;
         if req.vtxo_id.is_none() {
             return Err(MintError::InvalidRequest(format!(
                 "signing rejected: no VTXO allocation for quote {}",
@@ -105,7 +111,7 @@ impl SignatoryPolicy for DefaultSignatoryPolicy {
     }
 
     fn can_sign_swap(&self, req: &SwapSignRequest<'_>) -> Result<()> {
-        Self::validate_outputs(req.outputs, req.input_total_sat)
+        Self::validate_outputs(req.outputs, req.input_total_sat, req.keyset_id)
     }
 }
 
@@ -133,6 +139,7 @@ mod tests {
             quote_state: QuoteState::Unpaid,
             quote_expiry: u64::MAX,
             now: 0,
+            keyset_id: KEYSET_ID,
             vtxo_id: Some("v1"),
         };
         assert!(p.can_sign_mint(&req).is_err());
@@ -149,6 +156,7 @@ mod tests {
             quote_state: QuoteState::Paid,
             quote_expiry: u64::MAX,
             now: 0,
+            keyset_id: KEYSET_ID,
             vtxo_id: None,
         };
         assert!(p.can_sign_mint(&req).is_err());
@@ -165,6 +173,7 @@ mod tests {
             quote_state: QuoteState::Paid,
             quote_expiry: u64::MAX,
             now: 0,
+            keyset_id: KEYSET_ID,
             vtxo_id: Some("v1"),
         };
         p.can_sign_mint(&req).unwrap();
@@ -181,6 +190,7 @@ mod tests {
             quote_state: QuoteState::Paid,
             quote_expiry: u64::MAX,
             now: 0,
+            keyset_id: KEYSET_ID,
             vtxo_id: Some("v1"),
         };
         assert!(p.can_sign_mint(&req).is_err());

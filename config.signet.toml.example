@@ -21,8 +21,9 @@ auto_claim_exits = false
 
 [signatory]
 # mock | remote (cdk-signatory) | local (dev-only)
-backend = "mock"
-# url = "http://127.0.0.1:3340"
+# Production signet: use remote signatory and match /v1/keysets id in wallets.
+backend = "remote"
+url = "http://127.0.0.1:3340"
 
 [bitcoin]
 # Point at your signet bitcoind (Pi or local). Esplora-only is not enough for barkd.
@@ -51,6 +52,8 @@ backend = "inherit"
 vtxo_verify_mode = "scaffold"
 signatory_policy_enforced = true
 pol_enabled = true
+release_backing_on_melt = true
+release_backing_on_melt_fifo = false
 
 [trust.ots]
 enabled = false

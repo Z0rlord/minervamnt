@@ -42,12 +42,31 @@ Arkade operators typically run a local wallet daemon exposing barkd-style REST
 endpoints under `/api/v1/`. Point `ark.wallet_url` at that service and supply
 the auth token from the daemon datadir.
 
+`ArkadeArkClient::ping()` checks **both** ark-rest `get_info` and
+`GET /api/v1/wallet/connected` when `wallet_url` is set.
+
 Verify connectivity:
 
 ```bash
 curl -s http://127.0.0.1:3535/api/v1/wallet/connected \
   -H "Authorization: Bearer $ARKADE_WALLET_AUTH_TOKEN"
 ```
+
+## Mainnet operator checklist
+
+1. Copy `config.mainnet.toml.example` → `config.mainnet.toml`
+2. Set `ark.server_url`, `server_pubkey`, `wallet_url`
+3. Run wallet daemon + fund ASP balance for melt volume
+4. Run CDK signatory (`signatory.backend = "remote"`)
+5. Set `trust.vtxo_verify_mode = "vpack"`
+6. Enable melt backing release (`release_backing_on_melt` / `token_ids`)
+7. Point Doppler: `ARK_BACKEND=arkade`, `ARK_WALLET_URL`, `ARKADE_WALLET_AUTH_TOKEN`
+
+| Env | Purpose |
+| --- | ------- |
+| `MELT_BACKEND` | `inherit` (default) uses ark backend for live LN melt |
+| `MINERVA_RELEASE_BACKING_ON_MELT` | Release VTXO mapping after melt |
+| `MINERVA_VTXO_VERIFY_MODE` | `vpack` on mainnet |
 
 ## Signet vs mainnet
 

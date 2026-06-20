@@ -266,6 +266,86 @@ impl VtxoInventory {
         Ok(mapping)
     }
 
+    /// Release up to `amount_msat` of backing for `token_id` (partial or full row).
+    pub fn release_vtxo_backing(&self, token_id: &str, amount_msat: u64) -> Result<u64> {
+        if amount_msat == 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mapping = conn
+            .query_row(
+                "SELECT token_id, vtxo_id, amount_msat, issued_at, expires_at
+                 FROM token_vtxo_map WHERE token_id = ?1",
+                params![token_id],
+                |row| {
+                    Ok(TokenMapping {
+                        token_id: row.get(0)?,
+                        vtxo_id: row.get(1)?,
+                        amount_msat: row.get::<_, i64>(2)? as u64,
+                        issued_at: row.get::<_, i64>(3)? as u64,
+                        expires_at: row.get::<_, i64>(4)? as u64,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| MintError::MappingNotFound(token_id.to_string()))?;
+
+        let release = amount_msat.min(mapping.amount_msat);
+        if release >= mapping.amount_msat {
+            conn.execute(
+                "DELETE FROM token_vtxo_map WHERE token_id = ?1",
+                params![token_id],
+            )?;
+        } else {
+            conn.execute(
+                "UPDATE token_vtxo_map SET amount_msat = amount_msat - ?1 WHERE token_id = ?2",
+                params![release as i64, token_id],
+            )?;
+        }
+        Ok(release)
+    }
+
+    /// Release oldest token mappings until `amount_msat` is covered (operator PoR).
+    pub fn deallocate_fifo(&self, amount_msat: u64) -> Result<u64> {
+        if amount_msat == 0 {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token_id, amount_msat FROM token_vtxo_map ORDER BY issued_at ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut mappings = Vec::new();
+        while let Some(row) = rows.next()? {
+            mappings.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64));
+        }
+        drop(rows);
+        drop(stmt);
+
+        let mut remaining = amount_msat;
+        let mut released = 0u64;
+        for (token_id, mapped_msat) in mappings {
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(mapped_msat);
+            if take >= mapped_msat {
+                conn.execute(
+                    "DELETE FROM token_vtxo_map WHERE token_id = ?1",
+                    params![token_id],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE token_vtxo_map SET amount_msat = amount_msat - ?1 WHERE token_id = ?2",
+                    params![take as i64, token_id],
+                )?;
+            }
+            remaining -= take;
+            released += take;
+        }
+        Ok(released)
+    }
+
     pub fn get_mapping(&self, token_id: &str) -> Result<Option<TokenMapping>> {
         let conn = self.conn.lock().unwrap();
         let mapping = conn

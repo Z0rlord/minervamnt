@@ -408,9 +408,16 @@ start_mint() {
 fetch_keyset_id() {
   local tmp
   tmp="$(mktemp)"
-  curl -s -m 10 "$MINT_URL/v1/info" >"$tmp"
+  curl -s -m 10 "$MINT_URL/v1/keysets" >"$tmp" 2>/dev/null || true
   local kid
-  kid="$(json_get "$tmp" '.nuts."4".methods[0].id // empty')"
+  kid="$(json_get "$tmp" '.keysets[] | select(.active==true) | .id' 2>/dev/null || true)"
+  if [[ -z "$kid" || "$kid" == "null" ]]; then
+    kid="$(json_get "$tmp" '.keysets[0].id // empty')"
+  fi
+  if [[ -z "$kid" || "$kid" == "null" ]]; then
+    curl -s -m 10 "$MINT_URL/v1/info" >"$tmp"
+    kid="$(json_get "$tmp" '.nuts."4".methods[0].id // empty')"
+  fi
   rm -f "$tmp"
   if [[ -n "$kid" && "$kid" != "null" ]]; then
     KEYSET_ID="$kid"

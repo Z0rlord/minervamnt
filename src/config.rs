@@ -144,6 +144,12 @@ pub struct TrustConfig {
     pub pol_enabled: bool,
     #[serde(default)]
     pub ots: OtsConfig,
+    /// Release VTXO backing when melt succeeds (requires `token_ids` or FIFO).
+    #[serde(default)]
+    pub release_backing_on_melt: bool,
+    /// When `token_ids` are omitted, release oldest mappings FIFO up to melt amount.
+    #[serde(default)]
+    pub release_backing_on_melt_fifo: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +199,8 @@ impl Default for TrustConfig {
             max_mint_sat: None,
             pol_enabled: true,
             ots: OtsConfig::default(),
+            release_backing_on_melt: false,
+            release_backing_on_melt_fifo: false,
         }
     }
 }
@@ -340,6 +348,12 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("MINERVA_OTS_ENABLED") {
             self.trust.ots.enabled = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("MINERVA_RELEASE_BACKING_ON_MELT") {
+            self.trust.release_backing_on_melt = v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        if let Ok(v) = std::env::var("MINERVA_RELEASE_BACKING_ON_MELT_FIFO") {
+            self.trust.release_backing_on_melt_fifo = v == "1" || v.eq_ignore_ascii_case("true");
         }
         if let Ok(v) = std::env::var("BIND_ADDR") {
             if let Some((host, port)) = v.rsplit_once(':') {

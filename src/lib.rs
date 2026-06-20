@@ -15,6 +15,7 @@ pub mod bolt11_util;
 pub mod config;
 pub mod error;
 pub mod health;
+pub mod keyset_cache;
 pub mod mint_backend;
 pub mod ots;
 pub mod pol;

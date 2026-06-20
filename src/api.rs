@@ -16,6 +16,7 @@ pub fn router(backend: AppState) -> Router {
     Router::new()
         // Cashu NUT endpoints
         .route("/v1/info", get(info))
+        .route("/v1/keysets", get(keysets))
         .route("/v1/mint/quote/bolt11", post(mint_quote))
         .route("/v1/mint/quote/bolt11/{quote_id}", get(get_mint_quote))
         .route("/v1/mint/bolt11", post(mint))
@@ -38,7 +39,11 @@ pub fn router(backend: AppState) -> Router {
 }
 
 async fn info(State(b): State<AppState>) -> Json<MintInfo> {
-    Json(b.info())
+    Json(b.info().await)
+}
+
+async fn keysets(State(b): State<AppState>) -> Json<KeysetsResponse> {
+    Json(b.keysets().await)
 }
 
 async fn mint_quote(

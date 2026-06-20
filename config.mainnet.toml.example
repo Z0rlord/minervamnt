@@ -1,0 +1,55 @@
+# Mainnet profile — copy and point MINERVA_CONFIG at it.
+# Requires Arkade ASP + wallet daemon (see docs/arkade-asp.md).
+
+[mint]
+name = "Minerva Mint"
+description = "Ark-backed Cashu mint"
+url = "https://mint.example.com"
+
+[ark]
+backend = "arkade"
+server_url = "https://<your-arkade-asp>"
+server_pubkey = "<hex from ark-rest get_info>"
+wallet_url = "http://127.0.0.1:3535"
+poll_timeout_secs = 1200
+poll_interval_secs = 5
+refresh_threshold_blocks = 144
+default_vtxo_expiry = 25920
+# exit_claim_address = "bc1..."
+auto_claim_exits = false
+
+[signatory]
+backend = "remote"
+url = "http://127.0.0.1:3340"
+# tls_dir = "/path/to/certs"
+
+[bitcoin]
+rpc_url = "http://127.0.0.1:8332"
+
+[liquidity]
+min_vtxo_reserve_msat = 100_000_000
+max_single_vtxo_msat = 10_000_000_000
+auto_board_threshold = 0.5
+
+[database]
+path = "data/minerva-mainnet.sqlite"
+
+[server]
+host = "127.0.0.1"
+port = 3338
+
+[scheduler]
+refresh_interval_secs = 300
+
+[melt]
+backend = "inherit"
+
+[trust]
+vtxo_verify_mode = "vpack"
+signatory_policy_enforced = true
+pol_enabled = true
+release_backing_on_melt = true
+release_backing_on_melt_fifo = true
+
+[trust.ots]
+enabled = true
