@@ -129,6 +129,7 @@ mod tests {
     use crate::blind_signer::build_blind_signer;
     use crate::config::AppConfig;
     use crate::pol::PolLedger;
+    use crate::spent_store::SpentSecretStore;
     use crate::vtxo_inventory::VtxoInventory;
 
     fn backend_with_ark(ark: Arc<MockArkClient>) -> MintBackend {
@@ -137,7 +138,7 @@ mod tests {
         let signer = build_blind_signer(&config.signatory).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
-        MintBackend::new(config, ark, signer, inventory, pol, None)
+        MintBackend::new(config, ark, signer, inventory, pol, SpentSecretStore::open_in_memory().unwrap(), None)
     }
 
     #[tokio::test]
