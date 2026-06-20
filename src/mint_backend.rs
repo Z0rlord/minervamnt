@@ -167,12 +167,11 @@ impl MintBackend {
         Ok(outputs.iter().map(|o| o.amount).sum())
     }
 
-    /// Verify proofs and mark secrets spent. Does not update PoL (swap is net-zero).
-    fn verify_and_spend_inputs(&self, inputs: &[Proof]) -> Result<u64> {
+    /// Verify proofs (CDK when not mock), mark secrets spent. Does not update PoL (swap is net-zero).
+    async fn verify_and_spend_inputs(&self, inputs: &[Proof]) -> Result<u64> {
         if inputs.is_empty() {
             return Err(MintError::InvalidRequest("no inputs provided".into()));
         }
-        let mut spent = self.spent_secrets.lock().unwrap();
         let keyset_id = self.active_keyset_id();
         for p in inputs {
             if p.id != keyset_id && p.id != KEYSET_ID {
@@ -181,6 +180,12 @@ impl MintBackend {
                     p.id
                 )));
             }
+        }
+        if self.config.signatory.backend != "mock" {
+            self.signer.verify_proofs(inputs).await?;
+        }
+        let mut spent = self.spent_secrets.lock().unwrap();
+        for p in inputs {
             if spent.contains(&p.secret) {
                 return Err(MintError::TokenAlreadySpent);
             }
@@ -193,8 +198,9 @@ impl MintBackend {
     }
 
     fn record_melt_burns(&self, inputs: &[Proof]) -> Result<()> {
+        let keyset_id = self.active_keyset_id();
         for p in inputs {
-            self.pol.record_burn(&p.secret, p.amount)?;
+            self.pol.record_burn(&keyset_id, &p.secret, p.amount)?;
         }
         Ok(())
     }
@@ -348,8 +354,12 @@ impl MintBackend {
         let signatures = self.signer.blind_sign(&req.outputs).await?;
 
         let b_points: Vec<String> = req.outputs.iter().map(|o| o.b.clone()).collect();
-        self.pol
-            .record_mint(&req.quote, amount_sat, &b_points)?;
+        self.pol.record_mint(
+            &self.active_keyset_id(),
+            &req.quote,
+            amount_sat,
+            &b_points,
+        )?;
 
         self.mint_quotes
             .lock()
@@ -470,7 +480,7 @@ impl MintBackend {
             (q.amount_sat, q.fee_reserve_sat, q.request.clone())
         };
 
-        let input_total = self.verify_and_spend_inputs(&req.inputs)?;
+        let input_total = self.verify_and_spend_inputs(&req.inputs).await?;
         if input_total < amount_sat + fee_reserve_sat {
             return Err(MintError::Unbalanced {
                 inputs: input_total,
@@ -579,7 +589,7 @@ impl MintBackend {
                 keyset_id: &self.active_keyset_id(),
             })?;
         }
-        self.verify_and_spend_inputs(&req.inputs)?;
+        self.verify_and_spend_inputs(&req.inputs).await?;
         let signatures = self.signer.blind_sign(&req.outputs).await?;
         Ok(SwapResponse { signatures })
     }
@@ -646,7 +656,7 @@ impl MintBackend {
     // -- Transparency + PoL ---------------------------------------------------
 
     pub async fn transparency_summary(&self) -> Result<TransparencySummary> {
-        let pol = self.pol.status()?;
+        let pol = self.pol.status(&self.active_keyset_id())?;
         let height = self.ark.current_block_height().await?;
         let threshold = self.config.ark.refresh_threshold_blocks;
         let refresh_pending = self.inventory.get_refresh_queue(height, threshold)?.len();
@@ -681,8 +691,10 @@ impl MintBackend {
     }
 
     pub fn pol_status(&self) -> Result<PolStatusResponse> {
-        let s = self.pol.status()?;
+        let keyset_id = self.active_keyset_id();
+        let s = self.pol.status(&keyset_id)?;
         Ok(PolStatusResponse {
+            active_keyset_id: keyset_id,
             current_epoch_day: s.current_epoch_day,
             open_mint_total_sat: s.open_mint_total_sat,
             open_burn_total_sat: s.open_burn_total_sat,
@@ -703,21 +715,23 @@ impl MintBackend {
             tracing::warn!("OTS enabled but no stamper configured");
             return Ok(());
         };
-        if self.pol.has_ots_stamp(epoch_day)? {
+        let keyset_id = self.active_keyset_id();
+        if self.pol.has_ots_stamp(epoch_day, &keyset_id)? {
             return Ok(());
         }
-        let Some(root) = self.pol.epoch_root_hash(epoch_day)? else {
+        let Some(root) = self.pol.epoch_root_hash(epoch_day, &keyset_id)? else {
             return Ok(());
         };
         let digest = digest_from_root_hex(&root)?;
         let stamp = ots.stamp_digest(digest).await?;
-        self.pol.save_ots_stamp(epoch_day, &stamp.proof_hex, &stamp.calendar_url)?;
+        self.pol
+            .save_ots_stamp(epoch_day, &keyset_id, &stamp.proof_hex, &stamp.calendar_url)?;
         tracing::info!(epoch = %epoch_day, calendar = %stamp.calendar_url, "PoL epoch stamped with OpenTimestamps");
         Ok(())
     }
 
     pub async fn stamp_pending_ots_epochs(&self) -> Result<usize> {
-        let pending = self.pol.epochs_pending_ots()?;
+        let pending = self.pol.epochs_pending_ots(&self.active_keyset_id())?;
         let mut done = 0;
         for day in pending {
             if self.stamp_epoch_ots(&day).await.is_ok() {
@@ -728,15 +742,16 @@ impl MintBackend {
     }
 
     pub fn pol_ots_proof(&self, epoch_day: &str) -> Result<PolOtsResponse> {
+        let keyset_id = self.active_keyset_id();
         let root = self
             .pol
-            .epoch_root_hash(epoch_day)?
+            .epoch_root_hash(epoch_day, &keyset_id)?
             .ok_or_else(|| MintError::InvalidRequest(format!("unknown epoch {epoch_day}")))?;
         let (proof_hex, calendar_url) = self
             .pol
-            .ots_proof(epoch_day)?
+            .ots_proof(epoch_day, &keyset_id)?
             .ok_or_else(|| MintError::InvalidRequest(format!("no OTS proof for {epoch_day}")))?;
-        let roots = self.pol.roots_for_keyset(KEYSET_ID)?;
+        let roots = self.pol.roots_for_keyset(&keyset_id)?;
         let stamped_at = roots
             .iter()
             .find(|r| r.epoch_day == epoch_day)
@@ -1012,6 +1027,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn melt_releases_backing_with_token_ids() {
+        let mut config = test_config();
+        config.trust.release_backing_on_melt = true;
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        let b = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open_in_memory().unwrap(),
+            PolLedger::open_in_memory().unwrap(),
+            None,
+        );
+
+        let quote_a = b
+            .mint_quote(MintQuoteBolt11Request {
+                amount: 64,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        b.mint(MintBolt11Request {
+            quote: quote_a.quote.clone(),
+            outputs: outputs_for(64, "a"),
+        })
+        .await
+        .unwrap();
+
+        let quote_b = b
+            .mint_quote(MintQuoteBolt11Request {
+                amount: 512,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let minted_b = b
+            .mint(MintBolt11Request {
+                quote: quote_b.quote.clone(),
+                outputs: outputs_for(512, "b"),
+            })
+            .await
+            .unwrap();
+
+        let melt_quote = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: "lnbc1".into(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let needed = melt_quote.amount + melt_quote.fee_reserve;
+        let proofs = proofs_from(&minted_b.signatures);
+        assert!(proofs.iter().map(|p| p.amount).sum::<u64>() >= needed);
+
+        b.melt(MeltBolt11Request {
+            quote: melt_quote.quote,
+            inputs: proofs,
+            token_ids: Some(vec![quote_b.quote.clone()]),
+        })
+        .await
+        .unwrap();
+
+        assert!(b.token_vtxo(&quote_b.quote).await.is_err());
+        assert!(b.token_vtxo(&quote_a.quote).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn stamp_epoch_ots_with_mock() {
         let config = test_config();
         let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
@@ -1027,9 +1109,11 @@ mod tests {
             Some(Arc::new(crate::ots::MockOtsStamper)),
         );
         let day = PolLedger::current_epoch_day();
-        b.pol().record_mint("q1", 8, &["02b".into()]).unwrap();
-        b.pol().close_epoch(&day).unwrap();
+        b.pol()
+            .record_mint(KEYSET_ID, "q1", 8, &["02b".into()])
+            .unwrap();
+        b.pol().close_epoch(&day, KEYSET_ID).unwrap();
         b.stamp_epoch_ots(&day).await.unwrap();
-        assert!(b.pol().has_ots_stamp(&day).unwrap());
+        assert!(b.pol().has_ots_stamp(&day, KEYSET_ID).unwrap());
     }
 }

@@ -9,9 +9,11 @@
 use crate::config::SignatoryConfig;
 use crate::error::{MintError, Result};
 use crate::keyset_cache::MintKeysetState;
-use crate::types::{BlindSignature, BlindedMessage, KeysetInfo, KEYSET_ID};
+use crate::types::{BlindSignature, BlindedMessage, KeysetInfo, Proof, KEYSET_ID};
 use async_trait::async_trait;
-use cdk_common::{Amount, BlindedMessage as CdkBlindedMessage, Id, PublicKey};
+use cdk_common::{
+    secret::Secret, Amount, BlindedMessage as CdkBlindedMessage, Id, Proof as CdkProof, PublicKey,
+};
 use cdk_signatory::signatory::Signatory;
 use cdk_signatory::SignatoryRpcClient;
 use sha2::{Digest, Sha256};
@@ -21,6 +23,7 @@ use std::sync::Arc;
 #[async_trait]
 pub trait BlindSigner: Send + Sync {
     async fn blind_sign(&self, outputs: &[BlindedMessage]) -> Result<Vec<BlindSignature>>;
+    async fn verify_proofs(&self, proofs: &[crate::types::Proof]) -> Result<()>;
     async fn mint_pubkey_hex(&self) -> Result<String>;
     async fn keyset_state(&self) -> Result<MintKeysetState>;
 }
@@ -57,6 +60,10 @@ pub struct MockBlindSigner;
 impl BlindSigner for MockBlindSigner {
     async fn blind_sign(&self, outputs: &[BlindedMessage]) -> Result<Vec<BlindSignature>> {
         Ok(outputs.iter().map(mock_blind_sign).collect())
+    }
+
+    async fn verify_proofs(&self, _proofs: &[Proof]) -> Result<()> {
+        Ok(())
     }
 
     async fn mint_pubkey_hex(&self) -> Result<String> {
@@ -125,6 +132,20 @@ impl BlindSigner for RemoteCdkSigner {
         sigs.into_iter().map(from_cdk_blind_signature).collect()
     }
 
+    async fn verify_proofs(&self, proofs: &[Proof]) -> Result<()> {
+        if proofs.is_empty() {
+            return Ok(());
+        }
+        self.connect().await?;
+        let cdk_proofs: Vec<CdkProof> = proofs.iter().map(to_cdk_proof).collect::<Result<_>>()?;
+        let guard = self.client.lock().await;
+        let client = guard.as_ref().expect("connected");
+        Signatory::verify_proofs(client, cdk_proofs)
+            .await
+            .map_err(|e| MintError::InvalidRequest(format!("signatory verify_proofs: {e}")))?;
+        Ok(())
+    }
+
     async fn mint_pubkey_hex(&self) -> Result<String> {
         Ok(self.keyset_state().await?.pubkey)
     }
@@ -173,6 +194,16 @@ impl BlindSigner for LocalDhkeSigner {
         Ok(sigs)
     }
 
+    async fn verify_proofs(&self, proofs: &[Proof]) -> Result<()> {
+        for proof in proofs {
+            let c = PublicKey::from_str(&proof.c)
+                .map_err(|e| MintError::InvalidRequest(format!("invalid proof C: {e}")))?;
+            cdk_common::dhke::verify_message(&self.secret, c, proof.secret.as_bytes())
+                .map_err(|e| MintError::InvalidRequest(format!("invalid proof: {e}")))?;
+        }
+        Ok(())
+    }
+
     async fn mint_pubkey_hex(&self) -> Result<String> {
         Ok(self.keyset_state().await?.pubkey)
     }
@@ -189,6 +220,22 @@ impl BlindSigner for LocalDhkeSigner {
             }],
         })
     }
+}
+
+fn to_cdk_proof(proof: &Proof) -> Result<CdkProof> {
+    let keyset_id = Id::from_str(&proof.id)
+        .map_err(|e| MintError::InvalidRequest(format!("invalid keyset id: {e}")))?;
+    let c = PublicKey::from_str(&proof.c)
+        .map_err(|e| MintError::InvalidRequest(format!("invalid proof C: {e}")))?;
+    Ok(CdkProof {
+        amount: Amount::from(proof.amount),
+        keyset_id,
+        secret: Secret::new(proof.secret.clone()),
+        c,
+        witness: None,
+        dleq: None,
+        p2pk_e: None,
+    })
 }
 
 fn to_cdk_blinded_message(msg: &BlindedMessage) -> Result<CdkBlindedMessage> {
