@@ -2,6 +2,9 @@
 # Signet melt smoke test for Minerva Mint.
 # Exercises mint quote → mint → melt quote → melt against a signet-configured instance.
 # Live melt requires barkd (wallet funded) + BARKD_AUTH_TOKEN; script reports partial success.
+#
+# Signing: this harness always uses SIGNATORY_BACKEND=mock (random B_ values are fine).
+# For remote cdk-signatory gRPC/mTLS, run scripts/signet-signatory-ping.sh separately.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -379,6 +382,9 @@ start_mint() {
   export MINERVA_CONFIG="$CONFIG"
   export ARK_POLL_TIMEOUT_SECS="${ARK_POLL_TIMEOUT_SECS:-1200}"
   export ARK_POLL_INTERVAL_SECS="${ARK_POLL_INTERVAL_SECS:-5}"
+  # Melt smoke uses mock blind signing (harness emits random B_ points).
+  export SIGNATORY_BACKEND=mock
+  unset SIGNATORY_URL SIGNATORY_TLS_DIR 2>/dev/null || true
   load_dotenv "$ROOT/.env"
 
   local runner=("$MINT_BIN")
@@ -703,6 +709,7 @@ main() {
   fi
 
   build_mint
+  log "signatory: mock (remote gRPC → scripts/signet-signatory-ping.sh)"
   start_mint
   fetch_keyset_id
 

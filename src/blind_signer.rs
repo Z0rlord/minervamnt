@@ -107,12 +107,34 @@ impl RemoteCdkSigner {
     async fn connect(&self) -> Result<()> {
         let mut guard = self.client.lock().await;
         if guard.is_none() {
-            let client = SignatoryRpcClient::new(self.url.clone(), self.tls_dir.as_deref())
+            let url = normalize_signatory_grpc_url(&self.url, self.tls_dir.is_some())?;
+            let client = SignatoryRpcClient::new(url, self.tls_dir.as_deref())
                 .await
                 .map_err(|e| MintError::InvalidRequest(format!("signatory connect: {e}")))?;
             *guard = Some(client);
         }
         Ok(())
+    }
+}
+
+/// Tonic expects `https://` when mTLS client certs are configured.
+fn normalize_signatory_grpc_url(url: &str, tls: bool) -> Result<String> {
+    if tls {
+        if let Some(rest) = url.strip_prefix("http://") {
+            Ok(format!("https://{rest}"))
+        } else if url.starts_with("https://") {
+            Ok(url.to_string())
+        } else {
+            Err(MintError::InvalidRequest(format!(
+                "invalid signatory.url {url:?}; expected http(s)://host:port"
+            )))
+        }
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        Ok(url.to_string())
+    } else {
+        Err(MintError::InvalidRequest(format!(
+            "invalid signatory.url {url:?}; expected http(s)://host:port"
+        )))
     }
 }
 
