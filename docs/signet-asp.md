@@ -129,7 +129,8 @@ Expect `ark_connected: true` when barkd is wired to the signet ASP.
 | `ark.auto_claim_exits` / `ARK_AUTO_CLAIM_EXITS` | Poll + claim when exit becomes claimable |
 | `ark.poll_timeout_secs` | Max wait for board/refresh/exit (default 600) |
 | `signatory.backend` / `SIGNATORY_BACKEND` | `mock`, `remote`, or `local` |
-| `signatory.url` / `SIGNATORY_URL` | cdk-signatory gRPC URL |
+| `signatory.url` / `SIGNATORY_URL` | cdk-signatory gRPC URL (`https://localhost:3340` with mTLS) |
+| `signatory.tls_dir` / `SIGNATORY_TLS_DIR` | Directory with `ca.pem`, `client.pem`, `client.key` |
 | `melt.backend` / `MELT_BACKEND` | `inherit` (default), `mock`, or `barkd` |
 
 ## Melt payout (Lightning)
@@ -148,12 +149,65 @@ Token mint/swap signatures use [`BlindSigner`](../src/blind_signer.rs):
 
 | `signatory.backend` | Use |
 | ------------------- | --- |
-| `mock` | Deterministic dev signatures (default) |
+| `mock` | Deterministic dev signatures (default in `config.signet.toml`) |
 | `remote` | [cdk-signatory](https://github.com/cashubtc/cdk) gRPC — production |
 | `local` | In-process dhke with `SIGNATORY_MINT_SECRET` — dev only |
 
-Run signatory separately and point `signatory.url` (or `SIGNATORY_URL`) at its
-gRPC endpoint. Keep mint keys off the mint host in production.
+Keep mint keys off the mint host in production (`signatory.backend = "remote"`).
+
+### Remote signatory (signet / local dev)
+
+1. **Install** `cdk-signatory` 0.17.1 (or let the start script install to `.local/bin`):
+
+   ```bash
+   cargo install cdk-signatory@0.17.1 --root .local
+   ```
+
+2. **Start** — generates mTLS certs (first run), launches gRPC on `:3340`, and
+   bootstraps a sat keyset when the DB is empty:
+
+   ```bash
+   bash scripts/start-cdk-signatory-signet.sh
+   ```
+
+   Work dir: `data/cdk-signatory-signet/` (seed, sqlite, certs). Server cert
+   must include SAN `DNS:localhost` and `IP:127.0.0.1` (the start script sets
+   this via `-extfile`).
+
+3. **Point the mint** at the signatory:
+
+   ```bash
+   export SIGNATORY_BACKEND=remote
+   export SIGNATORY_URL=https://localhost:3340
+   export SIGNATORY_TLS_DIR="$PWD/data/cdk-signatory-signet"
+   export MINERVA_CONFIG=config.signet.toml
+   cargo run
+   ```
+
+   With mTLS, use `https://localhost:3340` (not bare `127.0.0.1` unless the
+   server cert lists that IP in SAN). The mint normalizes `http://` → `https://`
+   when `SIGNATORY_TLS_DIR` is set.
+
+4. **Verify gRPC** (no mint required):
+
+   ```bash
+   bash scripts/signet-signatory-ping.sh
+   ```
+
+### Smoke tests
+
+| Script | What it checks |
+| ------ | -------------- |
+| `scripts/signet-melt-smoke.sh` | Ark board/mint/melt path — **always uses mock signatory** |
+| `scripts/signet-signatory-ping.sh` | Remote cdk-signatory gRPC + mTLS + active keyset |
+
+Run both for a full signet dev check:
+
+```bash
+bash scripts/signet-signatory-ping.sh
+BARKD_DATADIR="$HOME/.bark-signet-melt" MINERVA_CONFIG=config.signet.toml \
+  bash scripts/signet-melt-smoke.sh
+```
 
 ## Exit claim automation
 
@@ -163,9 +217,9 @@ become claimable. The `/ark/exit` response includes `phase` and `claim_txid`.
 
 ## Limitations (current)
 
-- **PoL keyset id** — epoch roots still keyed to the scaffold id until CDK keyset rotation is wired through PoL.
 - **`/v1/info` pubkey** — served from signatory keyset cache at startup; restart mint after signatory key rotation.
 - **Melt backing** — pass `token_ids` (mint quote UUIDs) on `POST /v1/melt/bolt11`, or enable `release_backing_on_melt_fifo` in config.
+- **Melt smoke + remote signatory** — `signet-melt-smoke.sh` uses mock signing; use `signet-signatory-ping.sh` for CDK gRPC. Full blind-sign e2e against remote signatory needs valid `B_` points (not yet in the bash harness).
 - **Arkade on signet** — use Second/barkd here; see [arkade-asp.md](arkade-asp.md) for Arkade mainnet.
 
 ## Troubleshooting
@@ -176,6 +230,8 @@ become claimable. The `/ark/exit` response includes `phase` and `claim_txid`.
 | Board timeout | On-chain funds? `boards/pending`, esplora sync |
 | Refresh timeout | `wallet/rounds`, signet round interval (~minutes) |
 | 401 from barkd | `BARKD_AUTH_TOKEN` matches datadir |
+| `signatory connect: transport error` | Signatory running? `bash scripts/start-cdk-signatory-signet.sh`; use `https://localhost:3340` + `SIGNATORY_TLS_DIR` |
+| `invalid B_: malformed public key` | Real signatory rejects random points — use a proper Cashu wallet or mock signatory for harness tests |
 
 ## Links
 

@@ -37,3 +37,7 @@ lightning-invoice = "0.32"
 http-body-util = "0.1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[[example]]
+name = "signatory_ping"
+path = "examples/signatory_ping.rs"
