@@ -191,11 +191,23 @@ log "Updating boot partition cloud-init for SSH recovery..."
 # Backup
 sudo cp "$BOOT_VOL/user-data" "$BOOT_VOL/user-data.bak-recovery" 2>/dev/null || true
 sudo cp "$BOOT_VOL/cmdline.txt" "$BOOT_VOL/cmdline.txt.bak-recovery" 2>/dev/null || true
+sudo cp "$BOOT_VOL/network-config" "$BOOT_VOL/network-config.bak-recovery" 2>/dev/null || true
+sudo cp "$BOOT_VOL/meta-data" "$BOOT_VOL/meta-data.bak-recovery" 2>/dev/null || true
 
-# Force cloud-init re-run with new instance ID
-sudo tee "$BOOT_VOL/cmdline.txt" >/dev/null <<EOF
-cfg80211.ieee80211_regdom=US ds=nocloud;i=${RECOVERY_ID}
-EOF
+# Force cloud-init re-run — preserve kernel root= params (never replace cmdline wholesale)
+BASE_CMDLINE=""
+if [[ -f "$BOOT_VOL/current/cmdline.txt" ]]; then
+  BASE_CMDLINE=$(tr -d '\n' <"$BOOT_VOL/current/cmdline.txt")
+elif [[ -f "$BOOT_VOL/cmdline.txt.bak-recovery" ]]; then
+  BASE_CMDLINE=$(tr -d '\n' <"$BOOT_VOL/cmdline.txt.bak-recovery" | sed -E 's/(^| )ds=nocloud[^ ]*//g; s/(^| )cfg80211\.ieee80211_regdom=[^ ]*//g')
+fi
+[[ -n "$BASE_CMDLINE" ]] || BASE_CMDLINE="console=serial0,115200 multipath=off dwc_otg.lpm_enable=0 console=tty1 root=LABEL=writable rootfstype=ext4 panic=10 rootwait fixrtc"
+
+printf '%s\n' "${BASE_CMDLINE} cfg80211.ieee80211_regdom=US ds=nocloud;i=${RECOVERY_ID}" | sudo tee "$BOOT_VOL/cmdline.txt" >/dev/null
+printf 'instance-id: %s\n' "$RECOVERY_ID" | sudo tee "$BOOT_VOL/meta-data" >/dev/null
+
+# Remove macOS FAT recovery debris if present
+sudo rm -f "$BOOT_VOL"/FSCK*.REC 2>/dev/null || true
 
 sudo tee "$BOOT_VOL/user-data" >/dev/null <<'EOF'
 #cloud-config

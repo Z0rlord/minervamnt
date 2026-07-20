@@ -42,7 +42,8 @@ if ! command -v bitcoind >/dev/null || ! bitcoind --version 2>/dev/null | grep -
   curl -sSLO "https://bitcoincore.org/bin/${base}/bitcoin-${BITCOIN_VERSION}-aarch64-linux-gnu.tar.gz"
   curl -sSLO "https://bitcoincore.org/bin/${base}/SHA256SUMS"
   curl -sSLO "https://bitcoincore.org/bin/${base}/SHA256SUMS.asc"
-  grep aarch64-linux-gnu SHA256SUMS | sha256sum -c -
+  # Match only the release tarball (SHA256SUMS also lists *-debug.tar.gz)
+  grep -E "bitcoin-${BITCOIN_VERSION}-aarch64-linux-gnu\\.tar\\.gz\$" SHA256SUMS | sha256sum -c -
   tar -xzf "bitcoin-${BITCOIN_VERSION}-aarch64-linux-gnu.tar.gz"
   sudo install -m 0755 -o root -g root -t /usr/local/bin \
     "bitcoin-${BITCOIN_VERSION}/bin/bitcoind" \

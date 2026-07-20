@@ -32,8 +32,11 @@ you can build from source or use published binaries when available.
 ## 2. Start barkd
 
 ```bash
-barkd --datadir ~/.bark-signet --host 127.0.0.1 --port 3535
+export BARKD_DATADIR=~/.bark-signet-melt
+barkd --datadir "$BARKD_DATADIR" --host 127.0.0.1 --port 3535
 ```
+
+Operator wallet for this session is **`~/.bark-signet-melt`** (funded). Ignore `~/.bark-signet-melt-fresh` unless deliberately testing an empty wallet.
 
 On first start, barkd prints an auth token. Save it:
 
@@ -44,7 +47,7 @@ export BARKD_AUTH_TOKEN='<token from barkd datadir>'
 Retrieve later:
 
 ```bash
-cat ~/.bark-signet/auth_token
+cat "$BARKD_DATADIR/auth_token"
 ```
 
 ## 3. Create signet wallet in barkd
@@ -200,6 +203,7 @@ Keep mint keys off the mint host in production (`signatory.backend = "remote"`).
 | ------ | -------------- |
 | `scripts/signet-melt-smoke.sh` | Ark board/mint/melt path — **always uses mock signatory** |
 | `scripts/signet-signatory-ping.sh` | Remote cdk-signatory gRPC + mTLS + active keyset |
+| `scripts/signet-wallet-e2e.sh` | Real BDHKE mint→melt against remote signatory (`examples/wallet_e2e.rs`) |
 
 Run both for a full signet dev check:
 
@@ -219,7 +223,7 @@ become claimable. The `/ark/exit` response includes `phase` and `claim_txid`.
 
 - **`/v1/info` pubkey** — served from signatory keyset cache at startup; restart mint after signatory key rotation.
 - **Melt backing** — pass `token_ids` (mint quote UUIDs) on `POST /v1/melt/bolt11`, or enable `release_backing_on_melt_fifo` in config.
-- **Melt smoke + remote signatory** — `signet-melt-smoke.sh` uses mock signing; use `signet-signatory-ping.sh` for CDK gRPC. Full blind-sign e2e against remote signatory needs valid `B_` points (not yet in the bash harness).
+- **Melt smoke + remote signatory** — `signet-melt-smoke.sh` uses mock signing; use `signet-signatory-ping.sh` for CDK gRPC. Full blind-sign e2e: `bash scripts/signet-wallet-e2e.sh` (`examples/wallet_e2e.rs` — valid BDHKE `B_` via cdk `dhke`).
 - **Arkade on signet** — use Second/barkd here; see [arkade-asp.md](arkade-asp.md) for Arkade mainnet.
 
 ## Troubleshooting

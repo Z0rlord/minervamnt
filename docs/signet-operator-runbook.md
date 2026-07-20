@@ -22,6 +22,8 @@ bark create --signet \
 barkd --datadir "$BARKD_DATADIR" --host 127.0.0.1 --port 3535
 ```
 
+Funded operator wallet for this session: **`~/.bark-signet-melt`**. Do not point `:3535` at `~/.bark-signet-melt-fresh` (low balance / retired for operator use).
+
 Fund via https://signet.2nd.dev using `bark address` (`tark1…`).
 
 Confirm before minting:
@@ -80,6 +82,16 @@ BARKD_DATADIR=~/.bark-signet-melt bash scripts/signet-melt-smoke.sh
 
 Expect **PASS** on health, mint, melt quote, and melt pay.
 
+## 5b. Real wallet e2e (remote signatory)
+
+With the stack already on remote signatory (`SIGNATORY_BACKEND=remote`):
+
+```bash
+bash scripts/signet-wallet-e2e.sh
+```
+
+This blinds real `B_` points via CDK DHKE, mints against `:3338`, then melts a recv-wallet invoice. Expect **PASS** on health, mint, melt quote, and melt pay.
+
 ## 6. Melt backing release
 
 When melting, pass mint quote UUIDs so VTXO backing is released:
@@ -108,6 +120,8 @@ release_backing_on_melt_fifo = true
 | Melt timeout | Ensure recv barkd on :3536 is running during melt |
 | Wrong keyset on mint | Check `/v1/keysets`; align CDK signatory active id |
 | `ark_connected: false` | barkd running? `wallet/connected` → 200? |
+| Refresh returns `unconfirmed` | Do **not** kill the datadir mid-round. After the funding tx confirms on signet, run `bark --datadir "$BARKD_DATADIR" maintain` (recovers output VTXOs). `round progress` alone is not enough if the CLI already exited. |
+| ASP `vtxo … is not spendable (state: spent)` while local shows spendable | Local DB is stale (often after a lost refresh). Drop the phantom VTXO with `bark dev vtxo drop --dangerous --vtxo <id>` only while barkd is stopped, then re-fund or recover via `maintain`. |
 
 ## Do not
 

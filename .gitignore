@@ -44,3 +44,15 @@ config.signet.toml
 
 # Logs
 *.log
+
+# Local caches / tool installs (never commit)
+.cache/
+.local/
+
+# Ad-hoc Pi scan scratch
+.pi-scan*
+.run-pi-scan.sh
+
+# Local config backups
+config.signet.toml.bak*
+*.toml.bak-e2e

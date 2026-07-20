@@ -41,3 +41,7 @@ tower = { version = "0.5", features = ["util"] }
 [[example]]
 name = "signatory_ping"
 path = "examples/signatory_ping.rs"
+
+[[example]]
+name = "wallet_e2e"
+path = "examples/wallet_e2e.rs"
