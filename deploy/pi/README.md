@@ -118,7 +118,50 @@ bash deploy/pi/run-stack-from-mac.sh
 Alby Hub UI: `http://pi5.local:8080` — complete the setup wizard after install.
 Bitcoin keeps syncing in the background; Alby Hub uses `bitcoind` RPC once blocks are available.
 
-### VPN on first boot (Tailscale + ZeroTier)
+## Signet mint stack (Tailscale only)
+
+Separate from the mainnet node + Alby Hub. Runs Minerva Mint with barkd operator,
+CDK signatory, and live melt against Second signet ASP.
+
+| Script / unit | Purpose |
+| ------------- | ------- |
+| `deploy/pi/deploy-signet-stack-from-mac.sh` | Build (Pi-native if Docker unavailable), rsync, install |
+| `deploy/pi/install-signet-stack.sh` | On-Pi install: user `minerva`, systemd, UFW :3338 on `tailscale0` |
+| `barkd-signet.service` | Operator wallet → `127.0.0.1:3535` |
+| `cdk-signatory-signet.service` | Blind signing → `127.0.0.1:3340` (mTLS) |
+| `minerva-mint-signet.service` | Cashu API → Tailscale IP `:3338` |
+
+Layout on the Pi:
+
+```text
+/opt/minervamnt/
+  bin/{minerva-mint,barkd,bark,signatory,signatory_ping}
+  config.signet.toml
+  .env                    # mode 600 — BARKD_AUTH_TOKEN, SIGNATORY_TLS_DIR, etc.
+  bark-operator/          # Pi-local signet operator wallet (fund separately)
+  data/cdk-signatory-signet/   # mTLS certs + signatory sqlite
+  data/minerva-signet.sqlite
+```
+
+Deploy from Mac (Tailscale):
+
+```bash
+export PI_HOST=z0rlord@100.96.246.94
+export SSH_KEY=~/.ssh/raspi_key
+bash deploy/pi/deploy-signet-stack-from-mac.sh
+```
+
+Reach mint: `http://100.96.246.94:3338` (or MagicDNS `http://raspi-sd:3338` on tailnet).
+**Not** exposed on LAN/public — UFW allows `:3338` only on `tailscale0`.
+
+Operator wallet is **Pi-local** (`/opt/minervamnt/bark-operator`). Do not rsync the Mac
+`~/.bark-signet-melt` datadir unless you intend to migrate keys; fund the Pi wallet via
+https://signet.2nd.dev after `bark --datadir /opt/minervamnt/bark-operator address`.
+
+Signet does not use the Pi mainnet `bitcoind`; barkd talks to Esplora. `/health` may show
+`bitcoin_rpc_error` until optional mainnet RPC creds are added — `ark_connected` is the
+mint readiness signal.
+
 
 With the SD card mounted as `/Volumes/system-boot` (e.g. `disk4`):
 

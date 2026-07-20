@@ -1,0 +1,22 @@
+[Unit]
+Description=Minerva Mint signet stack (Cashu + Ark)
+Documentation=https://github.com/Z0rlord/minervamnt
+After=network-online.target barkd-signet.service cdk-signatory-signet.service
+Wants=network-online.target
+Requires=barkd-signet.service cdk-signatory-signet.service
+
+[Service]
+Type=simple
+User=minerva
+Group=minerva
+WorkingDirectory=/opt/minervamnt
+EnvironmentFile=/opt/minervamnt/.env
+ExecStart=/opt/minervamnt/bin/minerva-mint
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/opt/minervamnt/data
+
+[Install]
+WantedBy=multi-user.target

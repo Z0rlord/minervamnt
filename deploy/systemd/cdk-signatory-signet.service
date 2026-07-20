@@ -1,0 +1,22 @@
+[Unit]
+Description=CDK signatory (signet mint blind signing)
+Documentation=https://github.com/cashubtc/cdk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minerva
+Group=minerva
+WorkingDirectory=/opt/minervamnt
+ExecStart=/opt/minervamnt/bin/signatory --enable-logging --log-level info \
+  --work-dir /opt/minervamnt/data/cdk-signatory-signet \
+  --listen-addr 127.0.0.1 --listen-port 3340
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/opt/minervamnt/data/cdk-signatory-signet
+
+[Install]
+WantedBy=multi-user.target

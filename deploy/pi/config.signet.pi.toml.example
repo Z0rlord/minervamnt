@@ -1,0 +1,55 @@
+# Pi signet profile — installed as /opt/minervamnt/config.signet.toml
+# Tailscale URL is substituted at deploy time (TS_IP from tailscale0).
+
+[mint]
+name = "Minerva Mint (signet)"
+description = "Ark-backed Cashu mint — Pi signet instance (Tailscale only)"
+url = "http://TS_IP:3338"
+
+[ark]
+backend = "barkd"
+server_url = "https://ark.signet.2nd.dev"
+server_pubkey = ""
+barkd_url = "http://127.0.0.1:3535"
+poll_timeout_secs = 1200
+poll_interval_secs = 5
+refresh_threshold_blocks = 72
+default_vtxo_expiry = 288
+auto_claim_exits = false
+
+[signatory]
+backend = "remote"
+url = "https://127.0.0.1:3340"
+
+[bitcoin]
+# Signet stack uses barkd + Esplora; no local signet bitcoind required.
+# Health may report bitcoin_rpc_error until you optionally wire mainnet RPC.
+rpc_url = "http://127.0.0.1:38332"
+
+[liquidity]
+min_vtxo_reserve_msat = 100_000_000
+max_single_vtxo_msat = 10_000_000_000
+auto_board_threshold = 0.5
+
+[database]
+path = "data/minerva-signet.sqlite"
+
+[server]
+host = "TS_IP"
+port = 3338
+
+[scheduler]
+refresh_interval_secs = 60
+
+[melt]
+backend = "inherit"
+
+[trust]
+vtxo_verify_mode = "scaffold"
+signatory_policy_enforced = true
+pol_enabled = true
+release_backing_on_melt = true
+release_backing_on_melt_fifo = false
+
+[trust.ots]
+enabled = false

@@ -1,0 +1,21 @@
+[Unit]
+Description=Barkd operator wallet (signet ASP)
+Documentation=https://second.tech/docs/barkd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minerva
+Group=minerva
+WorkingDirectory=/opt/minervamnt
+EnvironmentFile=/opt/minervamnt/.env
+ExecStart=/opt/minervamnt/bin/barkd --datadir /opt/minervamnt/bark-operator --host 127.0.0.1 --port 3535
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ReadWritePaths=/opt/minervamnt/bark-operator
+
+[Install]
+WantedBy=multi-user.target
