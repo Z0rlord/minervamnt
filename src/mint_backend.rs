@@ -122,6 +122,39 @@ impl MintBackend {
         }
     }
 
+    /// NUT-02 `GET /v1/keys`: public keys of all active keysets.
+    pub async fn keys(&self) -> KeysResponse {
+        let state = self.keyset_state.read().await;
+        let active: std::collections::HashSet<&str> = state
+            .keysets
+            .iter()
+            .filter(|k| k.active)
+            .map(|k| k.id.as_str())
+            .collect();
+        KeysResponse {
+            keysets: state
+                .keys
+                .iter()
+                .filter(|k| active.contains(k.id.as_str()))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// NUT-02 `GET /v1/keys/{keyset_id}`: public keys of one keyset (active or not).
+    pub async fn keys_for(&self, keyset_id: &str) -> Result<KeysResponse> {
+        let state = self.keyset_state.read().await;
+        let keyset = state
+            .keys
+            .iter()
+            .find(|k| k.id == keyset_id)
+            .cloned()
+            .ok_or_else(|| MintError::KeysetNotFound(keyset_id.to_string()))?;
+        Ok(KeysResponse {
+            keysets: vec![keyset],
+        })
+    }
+
     pub fn config(&self) -> &AppConfig {
         &self.config
     }

@@ -193,6 +193,22 @@ pub struct KeysetsResponse {
     pub keysets: Vec<KeysetInfo>,
 }
 
+/// NUT-01 keyset with its public keys, returned by `GET /v1/keys[/{id}]`.
+///
+/// `keys` maps amount -> compressed pubkey hex; serde renders u64 map keys
+/// as JSON strings, matching the NUT-01 wire format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeysetKeys {
+    pub id: String,
+    pub unit: String,
+    pub keys: std::collections::BTreeMap<u64, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeysResponse {
+    pub keysets: Vec<KeysetKeys>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeltBolt11Response {
     pub quote: String,

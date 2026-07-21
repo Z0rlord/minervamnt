@@ -8,8 +8,8 @@
 
 use crate::config::SignatoryConfig;
 use crate::error::{MintError, Result};
-use crate::keyset_cache::MintKeysetState;
-use crate::types::{BlindSignature, BlindedMessage, KeysetInfo, Proof, KEYSET_ID};
+use crate::keyset_cache::{single_key_keyset, MintKeysetState};
+use crate::types::{BlindSignature, BlindedMessage, KeysetInfo, KeysetKeys, Proof, KEYSET_ID};
 use async_trait::async_trait;
 use cdk_common::{
     secret::Secret, Amount, BlindedMessage as CdkBlindedMessage, Id, Proof as CdkProof, PublicKey,
@@ -231,8 +231,8 @@ impl BlindSigner for LocalDhkeSigner {
     }
 
     async fn keyset_state(&self) -> Result<MintKeysetState> {
+        let pubkey = self.pubkey.to_string();
         Ok(MintKeysetState {
-            pubkey: self.pubkey.to_string(),
             active_keyset_id: KEYSET_ID.to_string(),
             keysets: vec![KeysetInfo {
                 id: KEYSET_ID.to_string(),
@@ -240,6 +240,8 @@ impl BlindSigner for LocalDhkeSigner {
                 active: true,
                 input_fee_ppk: Some(0),
             }],
+            keys: vec![single_key_keyset(KEYSET_ID, &pubkey)],
+            pubkey,
         })
     }
 }
@@ -288,6 +290,19 @@ fn cdk_keysets_to_state(keysets: &cdk_signatory::signatory::SignatoryKeysets) ->
             input_fee_ppk: Some(ks.input_fee_ppk),
         })
         .collect();
+    let keys: Vec<KeysetKeys> = keysets
+        .keysets
+        .iter()
+        .map(|ks| KeysetKeys {
+            id: ks.id.to_string(),
+            unit: ks.unit.to_string(),
+            keys: ks
+                .keys
+                .iter()
+                .map(|(amount, pk)| (u64::from(*amount), pk.to_string()))
+                .collect(),
+        })
+        .collect();
     let active_keyset_id = entries
         .iter()
         .find(|k| k.active)
@@ -298,5 +313,6 @@ fn cdk_keysets_to_state(keysets: &cdk_signatory::signatory::SignatoryKeysets) ->
         pubkey: keysets.pubkey.to_string(),
         active_keyset_id,
         keysets: entries,
+        keys,
     }
 }

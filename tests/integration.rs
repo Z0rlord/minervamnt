@@ -41,6 +41,60 @@ async fn health_endpoint_returns_ok() {
 }
 
 #[tokio::test]
+async fn keys_endpoint_returns_active_keyset_keys() {
+    let app = test_app();
+    let response = app
+        .oneshot(Request::get("/v1/keys").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let keysets = json["keysets"].as_array().unwrap();
+    assert!(!keysets.is_empty());
+    let keyset = &keysets[0];
+    assert_eq!(keyset["id"], minerva_mint::mint_backend::KEYSET_ID);
+    assert_eq!(keyset["unit"], "sat");
+    // NUT-01 wire format: amounts are JSON string keys mapping to pubkey hex.
+    let keys = keyset["keys"].as_object().unwrap();
+    assert!(keys.contains_key("1"));
+    assert!(keys["1"].as_str().unwrap().len() == 66);
+}
+
+#[tokio::test]
+async fn keys_by_id_endpoint_returns_keyset_and_404_for_unknown() {
+    let app = test_app();
+    let path = format!("/v1/keys/{}", minerva_mint::mint_backend::KEYSET_ID);
+    let response = app
+        .clone()
+        .oneshot(Request::get(&path).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["keysets"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        json["keysets"][0]["id"],
+        minerva_mint::mint_backend::KEYSET_ID
+    );
+
+    let response = app
+        .oneshot(
+            Request::get("/v1/keys/00deadbeef000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn info_endpoint_returns_minerva_branding() {
     let app = test_app();
     let response = app

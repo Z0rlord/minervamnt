@@ -26,6 +26,9 @@ pub enum MintError {
     #[error("token mapping not found: {0}")]
     MappingNotFound(String),
 
+    #[error("keyset not found: {0}")]
+    KeysetNotFound(String),
+
     #[error("ark client error: {0}")]
     Ark(String),
 
@@ -39,7 +42,9 @@ pub enum MintError {
 impl MintError {
     fn status(&self) -> StatusCode {
         match self {
-            MintError::QuoteNotFound(_) | MintError::MappingNotFound(_) => StatusCode::NOT_FOUND,
+            MintError::QuoteNotFound(_)
+            | MintError::MappingNotFound(_)
+            | MintError::KeysetNotFound(_) => StatusCode::NOT_FOUND,
             MintError::Ark(_) | MintError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MintError::InsufficientLiquidity { .. } => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::BAD_REQUEST,
@@ -50,6 +55,8 @@ impl MintError {
     /// coarse mapping for the scaffold.
     fn code(&self) -> u16 {
         match self {
+            // 12001 = keyset not found per Cashu NUT error codes.
+            MintError::KeysetNotFound(_) => 12001,
             MintError::TokenAlreadySpent => 11001,
             MintError::Unbalanced { .. } => 11002,
             MintError::QuoteNotPaid(_) => 20001,
