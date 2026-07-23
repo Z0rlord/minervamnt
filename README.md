@@ -167,6 +167,7 @@ This repo ships **reference material** under `deploy/` — adapt to your environ
 | Path | Contents |
 | ---- | -------- |
 | `deploy/systemd/` | Example systemd unit for the mint binary |
+| `deploy/tailscale/` | Run on a VPS/Pi exposed over Tailscale only (reference) |
 | `deploy/cloudflared/` | Example Cloudflare Tunnel config (optional) |
 | `deploy/cloudflare-pages/` | Static landing page deploy notes |
 | `deploy/pi/` | Example bare-metal / edge notes (optional reference) |
@@ -174,7 +175,8 @@ This repo ships **reference material** under `deploy/` — adapt to your environ
 Typical production layout:
 
 1. Build release binary: `cargo build --release`
-2. Run behind reverse proxy or tunnel with TLS termination
+2. Run behind a reverse proxy, Cloudflare Tunnel, or **Tailscale** for TLS /
+   private access (see [deploy/tailscale/](deploy/tailscale/README.md))
 3. Point `[bitcoin].rpc_url` at your synced node (mainnet or signet)
 4. Connect a real Ark ASP — signet via barkd ([docs/signet-asp.md](docs/signet-asp.md))
    or Arkade ([docs/arkade-asp.md](docs/arkade-asp.md)); set

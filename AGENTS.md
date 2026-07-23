@@ -20,10 +20,10 @@ directory is a static page deployed independently via Cloudflare Pages).
 - Standard commands are in `README.md` (`cargo build` / `cargo test` / `cargo run`).
   Default dev mode uses a **mock ASP + mock signatory**, so no external services
   (Bitcoin Core, Ark ASP, cdk-signatory) are needed to run or test.
-- Before `cargo run`, ensure the SQLite data directory exists: `mkdir -p data`
-  (path `data/minerva.sqlite` from `config.toml`; `data/` is gitignored and is NOT
-  auto-created by the app).
-- The server listens on `0.0.0.0:3338`.
+- The app auto-creates the SQLite data dir (`data/` from `config.toml`, gitignored)
+  on startup, so no manual `mkdir` is required.
+- The server listens on `0.0.0.0:3338` by default; override with `BIND_ADDR=host:port`
+  (used by the deploy scripts to bind to a Tailscale IP).
 - `/health` reports a `bitcoin_rpc_error` in dev mode because no Bitcoin Core RPC is
   running — this is expected and does not mean the mint is down (`status` is still
   `ok` and `ark_connected` is `true`).
