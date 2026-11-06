@@ -43,25 +43,32 @@
   </div>
 
   <main id="site-content" class="home-main" hidden>
-    <div class="logo" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 2L4 7v10l8 5 8-5V7l-8-5z" stroke="#f7931a" stroke-width="1.5" stroke-linejoin="round"/>
-        <path d="M12 8v8M9 11h6" stroke="#f7931a" stroke-width="1.5" stroke-linecap="round"/>
-      </svg>
+    <div class="hero-illo">
+      <img src="/minerva-engraving.webp" alt="Engraving of Minerva striking a coin on an anvil" width="260" height="260">
     </div>
 
     <h1>Minerva Mint</h1>
-    <p class="tagline">Ark-backed Cashu ecash — private bearer tokens settled on Bitcoin.</p>
+    <p class="tagline">Private ecash. Bitcoin backing. Open infrastructure.</p>
 
     <div class="status">
       <span class="status-dot" aria-hidden="true"></span>
       Temporarily offline
     </div>
 
-    <div class="card">
-      <p>The mint is under active development and is not accepting connections at this time.</p>
-      <p>Check back soon — we're building open-source freedom-tech infrastructure worth the wait.</p>
+    <div class="flow" role="img" aria-label="Bitcoin anchors Ark backing, which backs the issued Cashu tokens">
+      <span class="flow-node">Bitcoin</span>
+      <span class="flow-arrow" aria-hidden="true">&rarr;</span>
+      <span class="flow-node">Ark backing</span>
+      <span class="flow-arrow" aria-hidden="true">&rarr;</span>
+      <span class="flow-node">Cashu tokens</span>
     </div>
+
+    <div class="card">
+      <p>Minerva Mint is an open-source, experimental Cashu ecash mint written in Rust. Users hold private bearer tokens issued by the mint; the mint's backing sits in Ark VTXOs instead of Lightning channel liquidity, and the operator can exit that backing to Bitcoin unilaterally if the Ark service fails.</p>
+      <p>The goal is freedom-tech infrastructure: ecash issuance and redemption on open protocols, with auditable liabilities and no single vendor controlling the full stack.</p>
+    </div>
+
+    <a class="btn btn-primary repo-btn" href="https://github.com/Z0rlord/minervamnt" rel="noopener noreferrer">View the source</a>
 
     <footer class="site-footer">
       <span>minervamnt.xyz</span>
