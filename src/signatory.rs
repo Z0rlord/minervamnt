@@ -5,7 +5,7 @@
 //! API cannot inflate supply without a paid quote and VTXO backing.
 
 use crate::error::{MintError, Result};
-use crate::types::{BlindedMessage, QuoteState, KEYSET_ID};
+use crate::types::{BlindedMessage, QuoteState};
 
 /// Context for a mint (deposit) signing request.
 #[derive(Debug, Clone)]
@@ -118,7 +118,7 @@ impl SignatoryPolicy for DefaultSignatoryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::BlindedMessage;
+    use crate::types::{BlindedMessage, KEYSET_ID};
 
     fn mint_outputs(amount: u64) -> Vec<BlindedMessage> {
         vec![BlindedMessage {

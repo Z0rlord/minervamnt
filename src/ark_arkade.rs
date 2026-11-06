@@ -102,9 +102,14 @@ impl ArkClient for ArkadeArkClient {
             .await
     }
 
-    async fn pay_lightning_invoice(&self, invoice: &str, amount_sat: u64) -> Result<String> {
+    async fn pay_lightning_invoice(
+        &self,
+        invoice: &str,
+        amount_sat: u64,
+        attempted_before: bool,
+    ) -> Result<String> {
         self.require_wallet()?
-            .pay_lightning_invoice(invoice, amount_sat)
+            .pay_lightning_invoice(invoice, amount_sat, attempted_before)
             .await
     }
 }

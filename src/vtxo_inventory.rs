@@ -70,7 +70,7 @@ impl VtxoInventory {
     }
 
     pub fn open_with_mode(path: impl AsRef<Path>, verify_mode: VtxoVerifyMode) -> Result<Self> {
-        Self::from_connection(Connection::open(path)?, verify_mode)
+        Self::from_connection(Connection::open(path)?, verify_mode, true)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -78,10 +78,21 @@ impl VtxoInventory {
     }
 
     pub fn open_in_memory_with_mode(verify_mode: VtxoVerifyMode) -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?, verify_mode)
+        Self::from_connection(Connection::open_in_memory()?, verify_mode, false)
     }
 
-    fn from_connection(conn: Connection, verify_mode: VtxoVerifyMode) -> Result<Self> {
+    fn from_connection(
+        conn: Connection,
+        verify_mode: VtxoVerifyMode,
+        file_backed: bool,
+    ) -> Result<Self> {
+        // The inventory, PoL ledger and spent store share one database file
+        // over separate connections; wait briefly on lock contention instead
+        // of failing writes mid-flow with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        if file_backed {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         conn.execute_batch(SCHEMA)?;
         Ok(VtxoInventory {
             conn: Arc::new(Mutex::new(conn)),

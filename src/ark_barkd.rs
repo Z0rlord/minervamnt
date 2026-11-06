@@ -65,7 +65,14 @@ impl ArkClient for BarkdArkClient {
         self.wallet.estimate_lightning_send_fee_sat(amount_sat).await
     }
 
-    async fn pay_lightning_invoice(&self, invoice: &str, amount_sat: u64) -> Result<String> {
-        self.wallet.pay_lightning_invoice(invoice, amount_sat).await
+    async fn pay_lightning_invoice(
+        &self,
+        invoice: &str,
+        amount_sat: u64,
+        attempted_before: bool,
+    ) -> Result<String> {
+        self.wallet
+            .pay_lightning_invoice(invoice, amount_sat, attempted_before)
+            .await
     }
 }

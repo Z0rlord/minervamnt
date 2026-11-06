@@ -125,6 +125,43 @@ pub enum QuoteState {
     Pending,
 }
 
+/// Internal reservation state of a melt quote, persisted in the spent store
+/// (see `docs/reserve-settle-receipts.md`). Distinct from the public
+/// NUT-05 [`QuoteState`]: `Reserved` is reported as `Pending`, `Settled` as
+/// `Paid`, and `Unpaid`/`Released` as `Unpaid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeltQuoteState {
+    /// Quote created, no inputs reserved yet.
+    Unpaid,
+    /// Inputs marked pending; payout in flight or outcome unknown.
+    Reserved,
+    /// Payout confirmed; inputs burned.
+    Settled,
+    /// Payout never started or definitively failed; inputs unmarked.
+    Released,
+}
+
+impl MeltQuoteState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MeltQuoteState::Unpaid => "unpaid",
+            MeltQuoteState::Reserved => "reserved",
+            MeltQuoteState::Settled => "settled",
+            MeltQuoteState::Released => "released",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "unpaid" => Some(MeltQuoteState::Unpaid),
+            "reserved" => Some(MeltQuoteState::Reserved),
+            "settled" => Some(MeltQuoteState::Settled),
+            "released" => Some(MeltQuoteState::Released),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MintQuoteBolt11Response {
     pub quote: String,
@@ -167,6 +204,9 @@ pub struct MeltQuoteBolt11Response {
     pub unit: String,
     pub state: QuoteState,
     pub expiry: u64,
+    /// Payment preimage once the melt has settled (NUT-23).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_preimage: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

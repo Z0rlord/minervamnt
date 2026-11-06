@@ -35,6 +35,32 @@ pub fn mock_amount_from_request(request: &str) -> u64 {
     (request.len() as u64).saturating_mul(100).max(1)
 }
 
+/// Build a real, signed regtest bolt11 invoice for tests, with a chosen
+/// payment hash so callers control the expected preimage.
+#[cfg(test)]
+pub(crate) fn signed_test_invoice(amount_sat: u64, payment_hash: [u8; 32]) -> String {
+    use cdk_common::bitcoin::hashes::sha256;
+    use cdk_common::bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use lightning_invoice::{Currency, InvoiceBuilder, PaymentSecret};
+
+    let secp = Secp256k1::new();
+    let sk = SecretKey::from_slice(&[7u8; 32]).unwrap();
+    InvoiceBuilder::new(Currency::Regtest)
+        .amount_milli_satoshis(amount_sat * 1000)
+        .description("minerva reserve/settle test".into())
+        .payment_hash(sha256::Hash::from_byte_array(payment_hash))
+        .payment_secret(PaymentSecret([42u8; 32]))
+        .duration_since_epoch(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap(),
+        )
+        .min_final_cltv_expiry_delta(144)
+        .build_signed(|msg| secp.sign_ecdsa_recoverable(msg, &sk))
+        .unwrap()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

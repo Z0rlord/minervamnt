@@ -32,6 +32,20 @@ pub enum MintError {
     #[error("ark client error: {0}")]
     Ark(String),
 
+    /// The Lightning payout definitively failed on the Ark side (the wallet
+    /// observed a terminal "failed" state). Distinct from [`MintError::Ark`],
+    /// which covers timeouts and ambiguous transport errors where the payout
+    /// outcome is unknown.
+    #[error("lightning payout definitively failed: {0}")]
+    PaymentFailed(String),
+
+    /// The wallet answered, but incoherently (a preimage that does not match
+    /// the payment hash, or a failure report after a success signal). The
+    /// payout outcome is unknown; unlike a transport error this is an
+    /// answer, so polling fallbacks must not keep second-guessing it.
+    #[error("lightning payout outcome unknown: {0}")]
+    PayoutUnknown(String),
+
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
@@ -45,7 +59,10 @@ impl MintError {
             MintError::QuoteNotFound(_)
             | MintError::MappingNotFound(_)
             | MintError::KeysetNotFound(_) => StatusCode::NOT_FOUND,
-            MintError::Ark(_) | MintError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MintError::Ark(_) | MintError::PayoutUnknown(_) | MintError::Database(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            MintError::PaymentFailed(_) => StatusCode::BAD_GATEWAY,
             MintError::InsufficientLiquidity { .. } => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::BAD_REQUEST,
         }

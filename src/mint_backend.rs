@@ -21,7 +21,7 @@ use crate::keyset_cache::MintKeysetState;
 use crate::ots::{digest_from_root_hex, OtsStamper};
 use crate::pol::PolLedger;
 use crate::signatory::{DefaultSignatoryPolicy, MintSignRequest, SignatoryPolicy, SwapSignRequest};
-use crate::spent_store::SpentSecretStore;
+use crate::spent_store::{MeltQuoteRecord, SpentSecretStore};
 use crate::types::*;
 use crate::vtxo_inventory::VtxoInventory;
 use sha2::{Digest, Sha256};
@@ -43,16 +43,6 @@ struct MintQuote {
     expiry: u64,
 }
 
-#[derive(Debug, Clone)]
-struct MeltQuote {
-    amount_sat: u64,
-    fee_reserve_sat: u64,
-    request: String,
-    payment_hash: Option<String>,
-    state: QuoteState,
-    expiry: u64,
-}
-
 pub struct MintBackend {
     config: AppConfig,
     ark: Arc<dyn ArkClient>,
@@ -64,7 +54,6 @@ pub struct MintBackend {
     policy_enforced: bool,
     keyset_state: RwLock<MintKeysetState>,
     mint_quotes: Mutex<HashMap<String, MintQuote>>,
-    melt_quotes: Mutex<HashMap<String, MeltQuote>>,
     spent: SpentSecretStore,
 }
 
@@ -91,7 +80,6 @@ impl MintBackend {
             spent,
             keyset_state: RwLock::new(MintKeysetState::mock_default()),
             mint_quotes: Mutex::new(HashMap::new()),
-            melt_quotes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -200,8 +188,9 @@ impl MintBackend {
         Ok(outputs.iter().map(|o| o.amount).sum())
     }
 
-    /// Verify proofs (CDK when not mock), mark secrets spent. Does not update PoL (swap is net-zero).
-    async fn verify_and_spend_inputs(&self, inputs: &[Proof]) -> Result<u64> {
+    /// Validate proofs (keyset ids and, unless the signatory is mocked, CDK
+    /// signatures) and return their total. Does not touch the spent store.
+    async fn verify_inputs(&self, inputs: &[Proof]) -> Result<u64> {
         if inputs.is_empty() {
             return Err(MintError::InvalidRequest("no inputs provided".into()));
         }
@@ -217,12 +206,19 @@ impl MintBackend {
         if self.config.signatory.backend != "mock" {
             self.signer.verify_proofs(inputs).await?;
         }
+        Ok(inputs.iter().map(|p| p.amount).sum())
+    }
+
+    /// Verify proofs (CDK when not mock), mark secrets spent. Does not update PoL (swap is net-zero).
+    async fn verify_and_spend_inputs(&self, inputs: &[Proof]) -> Result<u64> {
+        let input_total = self.verify_inputs(inputs).await?;
         let secrets: Vec<String> = inputs.iter().map(|p| p.secret.clone()).collect();
         if self.spent.any_spent(&secrets)? {
             return Err(MintError::TokenAlreadySpent);
         }
-        self.spent.mark_spent_batch(&keyset_id, inputs)?;
-        Ok(inputs.iter().map(|p| p.amount).sum())
+        self.spent
+            .mark_spent_batch(&self.active_keyset_id(), inputs)?;
+        Ok(input_total)
     }
 
     fn record_melt_burns(&self, inputs: &[Proof]) -> Result<()> {
@@ -445,6 +441,16 @@ impl MintBackend {
             Err(_) => (mock_amount_from_request(&req.request), None),
         };
 
+        // An invoice this mint already settled cannot be paid again; refuse
+        // the quote up front instead of letting a melt attempt discover it.
+        if let Some(hash) = &payment_hash {
+            if self.spent.has_settled_melt_for_hash(hash)? {
+                return Err(MintError::InvalidRequest(
+                    "invoice already paid by a settled melt".into(),
+                ));
+            }
+        }
+
         let fee_reserve_sat = self
             .ark
             .estimate_lightning_send_fee_sat(amount_sat)
@@ -452,17 +458,16 @@ impl MintBackend {
 
         let quote_id = Uuid::new_v4().to_string();
         let expiry = Self::now() + QUOTE_TTL_SECS;
-        self.melt_quotes.lock().unwrap().insert(
-            quote_id.clone(),
-            MeltQuote {
-                amount_sat,
-                fee_reserve_sat,
-                request: req.request,
-                payment_hash,
-                state: QuoteState::Unpaid,
-                expiry,
-            },
-        );
+        self.spent.insert_melt_quote(&MeltQuoteRecord {
+            quote_id: quote_id.clone(),
+            amount_sat,
+            fee_reserve_sat,
+            request: req.request,
+            payment_hash,
+            state: MeltQuoteState::Unpaid,
+            expiry,
+            preimage: None,
+        })?;
 
         Ok(MeltQuoteBolt11Response {
             quote: quote_id.clone(),
@@ -471,76 +476,166 @@ impl MintBackend {
             unit: "sat".into(),
             state: QuoteState::Unpaid,
             expiry,
+            payment_preimage: None,
         })
     }
 
     /// NUT-05: poll melt quote state by id.
     pub async fn get_melt_quote(&self, quote_id: &str) -> Result<MeltQuoteBolt11Response> {
-        let quotes = self.melt_quotes.lock().unwrap();
-        let quote = quotes
-            .get(quote_id)
+        let quote = self
+            .spent
+            .melt_quote(quote_id)?
             .ok_or_else(|| MintError::QuoteNotFound(quote_id.into()))?;
         Ok(MeltQuoteBolt11Response {
             quote: quote_id.into(),
             amount: quote.amount_sat,
             fee_reserve: quote.fee_reserve_sat,
             unit: "sat".into(),
-            state: quote.state,
+            state: public_melt_state(quote.state),
             expiry: quote.expiry,
+            payment_preimage: quote.preimage,
         })
     }
 
+    /// NUT-05 melt as reserve -> settle | release (docs/reserve-settle-receipts.md).
+    ///
+    /// Inputs are marked pending (reserved) before any payout is attempted.
+    /// A confirmed payout settles the reservation (inputs burned, PoL burns
+    /// recorded). A payout that never started or definitively failed releases
+    /// it (inputs spendable again). Any other error leaves the outcome
+    /// unknown: the reservation is held - never charged, never released -
+    /// until an operator reconciles it with
+    /// [`Self::reconcile_release_reserved_melt`].
     pub async fn melt(&self, req: MeltBolt11Request) -> Result<MeltBolt11Response> {
-        let (amount_sat, fee_reserve_sat, invoice) = {
-            let quotes = self.melt_quotes.lock().unwrap();
-            let q = quotes
-                .get(&req.quote)
-                .ok_or_else(|| MintError::QuoteNotFound(req.quote.clone()))?;
-            if q.state == QuoteState::Paid {
-                return Err(MintError::QuoteAlreadyIssued(req.quote.clone()));
-            }
-            if Self::now() > q.expiry {
-                return Err(MintError::InvalidRequest(format!(
-                    "quote expired: {}",
-                    req.quote
-                )));
-            }
-            (q.amount_sat, q.fee_reserve_sat, q.request.clone())
-        };
+        let quote = self
+            .spent
+            .melt_quote(&req.quote)?
+            .ok_or_else(|| MintError::QuoteNotFound(req.quote.clone()))?;
+        if Self::now() > quote.expiry {
+            return Err(MintError::InvalidRequest(format!(
+                "quote expired: {}",
+                req.quote
+            )));
+        }
 
-        let input_total = self.verify_and_spend_inputs(&req.inputs).await?;
-        if input_total < amount_sat + fee_reserve_sat {
+        // Verify before reserving so an invalid or undersized request changes
+        // no state.
+        let input_total = self.verify_inputs(&req.inputs).await?;
+        if input_total < quote.amount_sat + quote.fee_reserve_sat {
             return Err(MintError::Unbalanced {
                 inputs: input_total,
-                outputs: amount_sat + fee_reserve_sat,
+                outputs: quote.amount_sat + quote.fee_reserve_sat,
             });
         }
-        self.record_melt_burns(&req.inputs)?;
 
-        let preimage = if self.config.melt_uses_live_payout() {
+        // Reserve: quote UNPAID -> RESERVED, inputs marked pending, atomically.
+        // Rejects already-spent/reserved proofs, non-UNPAID quotes, and a
+        // second in-flight or already-settled payout for the same invoice.
+        let attempted_before =
+            self.spent
+                .reserve_melt(&req.quote, &self.active_keyset_id(), &req.inputs)?;
+
+        let payout = if self.config.melt_uses_live_payout() {
             self.ark
-                .pay_lightning_invoice(&invoice, amount_sat)
-                .await?
+                .pay_lightning_invoice(&quote.request, quote.amount_sat, attempted_before)
+                .await
         } else {
             let mut hasher = Sha256::new();
-            hasher.update(invoice.as_bytes());
-            hex::encode(hasher.finalize())
+            hasher.update(quote.request.as_bytes());
+            Ok(hex::encode(hasher.finalize()))
         };
 
-        self.melt_quotes
-            .lock()
-            .unwrap()
-            .get_mut(&req.quote)
-            .expect("quote exists")
-            .state = QuoteState::Paid;
+        match payout {
+            Ok(preimage) => {
+                // Settle: burn the reserved inputs, then record the burns.
+                self.spent.settle_melt(&req.quote, &preimage)?;
+                self.record_melt_burns(&req.inputs)?;
+                // If the backing release fails here the payout already
+                // settled and the inputs stay burned; the error is surfaced
+                // but the melt is not rolled back.
+                self.release_backing_for_melt(req.token_ids.as_ref(), input_total)?;
+                Ok(MeltBolt11Response {
+                    quote: req.quote,
+                    state: QuoteState::Paid,
+                    payment_preimage: Some(preimage),
+                })
+            }
+            Err(e) if payout_error_is_releasable(&e) => {
+                // The payout never started or definitively failed: release the
+                // reservation so the inputs are spendable again.
+                self.spent.release_melt(&req.quote)?;
+                Err(e)
+            }
+            Err(e) => {
+                // Unknown outcome (timeout, transport error, ambiguous ASP
+                // response). The payment may still complete or may already
+                // have completed: hold the reservation, charge nothing,
+                // release nothing, until reconciled.
+                tracing::warn!(
+                    quote = %req.quote,
+                    error = %e,
+                    "melt payout outcome unknown; reservation held for reconciliation"
+                );
+                Err(e)
+            }
+        }
+    }
 
-        self.release_backing_for_melt(req.token_ids.as_ref(), input_total)?;
+    /// Operator reconciliation for a melt stuck RESERVED after an unknown
+    /// payout outcome.
+    ///
+    /// The caller MUST first verify out-of-band that the payout definitively
+    /// failed or never started (for example via the wallet's Lightning
+    /// payment history for the quote's payment hash). Releasing a
+    /// reservation whose payout actually succeeded hands the client back
+    /// spendable proofs for a payment the mint already made, spending the
+    /// mint's backing twice.
+    pub fn reconcile_release_reserved_melt(&self, quote_id: &str) -> Result<()> {
+        self.spent.release_melt(quote_id)
+    }
 
-        Ok(MeltBolt11Response {
-            quote: req.quote,
-            state: QuoteState::Paid,
-            payment_preimage: Some(preimage),
-        })
+    /// Operator reconciliation for a melt stuck RESERVED whose payout the
+    /// operator has verified DID complete - for example a crash or storage
+    /// error between the confirmed payout and the settle commit, which the
+    /// release path must never touch (releasing there would hand back
+    /// spendable proofs for a payment the mint already made).
+    ///
+    /// The preimage is checked against the quote's stored payment hash when
+    /// one exists, so settling requires proof the payment happened. If the
+    /// burn recording fails after the settle commit, the PoL ledger
+    /// overstates liabilities (conservative) and the epoch can be
+    /// reconciled from the spent store.
+    pub fn reconcile_settle_reserved_melt(&self, quote_id: &str, preimage: &str) -> Result<()> {
+        let quote = self
+            .spent
+            .melt_quote(quote_id)?
+            .ok_or_else(|| MintError::QuoteNotFound(quote_id.into()))?;
+        verify_melt_preimage(preimage, quote.payment_hash.as_deref())?;
+        // A preimage verifies against the payment HASH, not against this
+        // quote's payout: if a sibling quote already settled this invoice,
+        // settling here would burn a second input set for one payment.
+        if let Some(hash) = &quote.payment_hash {
+            if self
+                .spent
+                .has_settled_melt_for_hash_excluding(hash, quote_id)?
+            {
+                return Err(MintError::InvalidRequest(format!(
+                    "invoice for quote {quote_id} was already settled by another melt; refusing to settle a second quote for the same payment"
+                )));
+            }
+        }
+        let inputs = self.spent.reserved_inputs(quote_id)?;
+        self.spent.settle_melt(quote_id, preimage)?;
+        for (secret, keyset_id, amount) in &inputs {
+            self.pol.record_burn(keyset_id, secret, *amount)?;
+        }
+        Ok(())
+    }
+
+    /// Melt quotes currently RESERVED (payout in flight or outcome unknown),
+    /// for operator reconciliation.
+    pub fn list_reserved_melts(&self) -> Result<Vec<MeltQuoteRecord>> {
+        self.spent.list_reserved_melts()
     }
 
     fn release_backing_for_melt(
@@ -814,6 +909,48 @@ impl MintBackend {
             roots,
         })
     }
+}
+
+/// Map the internal melt reservation state onto the public NUT-05 state.
+/// RESERVED reports PENDING (inputs locked, payout unresolved); SETTLED
+/// reports PAID; RELEASED reports UNPAID because the inputs are spendable
+/// again, though the released quote itself is terminal and a retry needs a
+/// fresh quote.
+fn public_melt_state(state: MeltQuoteState) -> QuoteState {
+    match state {
+        MeltQuoteState::Unpaid | MeltQuoteState::Released => QuoteState::Unpaid,
+        MeltQuoteState::Reserved => QuoteState::Pending,
+        MeltQuoteState::Settled => QuoteState::Paid,
+    }
+}
+
+/// A payout error is safe to release only when the wallet observed the
+/// current attempt's terminal "failed" state ([`MintError::PaymentFailed`]).
+/// Anything else - timeouts, transport errors, ambiguous ASP responses,
+/// history rows that cannot be scoped to this attempt - leaves the outcome
+/// unknown, and an unknown outcome is never treated as success or as a clean
+/// failure.
+fn payout_error_is_releasable(e: &MintError) -> bool {
+    matches!(e, MintError::PaymentFailed(_))
+}
+
+/// Verify that a hex preimage matches a melt quote's stored payment hash
+/// (sha256). Operator settle-reconciliation must not settle a quote whose
+/// payment cannot be proven. Quotes without a payment hash (mock payout
+/// mode) cannot be checked this way and pass.
+pub fn verify_melt_preimage(preimage_hex: &str, payment_hash: Option<&str>) -> Result<()> {
+    let Some(hash) = payment_hash else {
+        return Ok(());
+    };
+    let bytes = hex::decode(preimage_hex)
+        .map_err(|e| MintError::InvalidRequest(format!("invalid preimage hex: {e}")))?;
+    let digest = Sha256::digest(&bytes);
+    if !hex::encode(digest).eq_ignore_ascii_case(hash) {
+        return Err(MintError::InvalidRequest(
+            "preimage does not match the quote's payment hash".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1208,5 +1345,681 @@ mod tests {
         b.pol().close_epoch(&day, KEYSET_ID).unwrap();
         b.stamp_epoch_ots(&day).await.unwrap();
         assert!(b.pol().has_ots_stamp(&day, KEYSET_ID).unwrap());
+    }
+
+    // -- Reserve / settle / release (docs/reserve-settle-receipts.md) --------
+
+    /// Ark client whose Lightning payout always fails: either definitively
+    /// (terminal "failed" state, as the wallet reports it) or ambiguously
+    /// (timeout, outcome unknown).
+    struct FailingPayoutArk {
+        inner: MockArkClient,
+        definitive: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ArkClient for FailingPayoutArk {
+        async fn board_sats(&self, amount_msat: u64) -> Result<Vtxo> {
+            self.inner.board_sats(amount_msat).await
+        }
+        async fn refresh_vtxo(&self, vtxo: &Vtxo) -> Result<Vtxo> {
+            self.inner.refresh_vtxo(vtxo).await
+        }
+        async fn unilateral_exit(&self, vtxo: &Vtxo) -> Result<ExitResult> {
+            self.inner.unilateral_exit(vtxo).await
+        }
+        async fn get_vtxo_expiry(&self, vtxo: &Vtxo) -> Result<std::time::Duration> {
+            self.inner.get_vtxo_expiry(vtxo).await
+        }
+        async fn current_block_height(&self) -> Result<u64> {
+            self.inner.current_block_height().await
+        }
+        async fn ping(&self) -> Result<()> {
+            self.inner.ping().await
+        }
+        async fn estimate_lightning_send_fee_sat(&self, amount_sat: u64) -> Result<u64> {
+            self.inner.estimate_lightning_send_fee_sat(amount_sat).await
+        }
+        async fn pay_lightning_invoice(
+            &self,
+            invoice: &str,
+            _amount_sat: u64,
+            _attempted_before: bool,
+        ) -> Result<String> {
+            let hash = crate::bolt11_util::decode_invoice(invoice)
+                .map(|(_, h)| h)
+                .unwrap_or_else(|_| invoice.to_string());
+            if self.definitive {
+                Err(MintError::PaymentFailed(format!(
+                    "lightning payment {hash} failed"
+                )))
+            } else {
+                Err(MintError::Ark(format!(
+                    "timed out waiting for lightning payment status ({hash})"
+                )))
+            }
+        }
+    }
+
+    /// Live payout mode (real bolt11 invoices, payout via the Ark client).
+    fn live_config() -> AppConfig {
+        let mut config = test_config();
+        config.melt.backend = "barkd".into();
+        config
+    }
+
+    fn live_backend(definitive: bool) -> MintBackend {
+        let config = live_config();
+        let ark = Arc::new(FailingPayoutArk {
+            inner: MockArkClient::new(config.ark.default_vtxo_expiry),
+            definitive,
+        });
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open_in_memory().unwrap(),
+            PolLedger::open_in_memory().unwrap(),
+            SpentSecretStore::open_in_memory().unwrap(),
+            None,
+        )
+    }
+
+    /// Fixed test payment: preimage whose sha256 is the invoice's payment
+    /// hash, so reconcile-settle can be tested with a verifiable preimage.
+    const TEST_PREIMAGE: &[u8; 32] = b"minerva reserve-settle test!!!!!";
+    const _: () = assert!(TEST_PREIMAGE.len() == 32);
+
+    /// A real, signed regtest bolt11 invoice so live-mode quote validation passes.
+    fn test_invoice(amount_sat: u64) -> String {
+        use cdk_common::bitcoin::hashes::{sha256, Hash};
+        crate::bolt11_util::signed_test_invoice(
+            amount_sat,
+            sha256::Hash::hash(TEST_PREIMAGE).to_byte_array(),
+        )
+    }
+
+    /// Mint 1024 sat of proofs against `b`.
+    async fn mint_proofs(b: &MintBackend, tag: &str) -> Vec<Proof> {
+        let quote = b
+            .mint_quote(MintQuoteBolt11Request {
+                amount: 1024,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let minted = b
+            .mint(MintBolt11Request {
+                quote: quote.quote,
+                outputs: outputs_for(1024, tag),
+            })
+            .await
+            .unwrap();
+        proofs_from(&minted.signatures)
+    }
+
+    async fn melt_quote_500(b: &MintBackend) -> MeltQuoteBolt11Response {
+        b.melt_quote(MeltQuoteBolt11Request {
+            request: test_invoice(500),
+            unit: "sat".into(),
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn melt_payout_failure_releases_inputs() {
+        let b = live_backend(true);
+        let proofs = mint_proofs(&b, "relm").await;
+        let melt_quote = melt_quote_500(&b).await;
+
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::PaymentFailed(_)));
+
+        // The quote is terminally released: it reports UNPAID (inputs are
+        // spendable again) but cannot itself be re-melted.
+        let q = b.get_melt_quote(&melt_quote.quote).await.unwrap();
+        assert_eq!(q.state, QuoteState::Unpaid);
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+
+        // Nothing was burned: outstanding liability is unchanged.
+        assert_eq!(b.pol_status().unwrap().outstanding_sat, 1024);
+
+        // The inputs were released and can be swapped.
+        let swapped = b
+            .swap(SwapRequest {
+                inputs: proofs,
+                outputs: outputs_for(1024, "relm2"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            swapped.signatures.iter().map(|s| s.amount).sum::<u64>(),
+            1024
+        );
+    }
+
+    #[tokio::test]
+    async fn melt_unknown_outcome_holds_reservation_until_reconciled() {
+        let b = live_backend(false);
+        let proofs = mint_proofs(&b, "unkm").await;
+        let melt_quote = melt_quote_500(&b).await;
+
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::Ark(_)));
+
+        // Unknown outcome: the quote reports PENDING and the inputs stay
+        // locked - neither charged nor released.
+        let q = b.get_melt_quote(&melt_quote.quote).await.unwrap();
+        assert_eq!(q.state, QuoteState::Pending);
+        let err = b
+            .swap(SwapRequest {
+                inputs: proofs.clone(),
+                outputs: outputs_for(1024, "unkm2"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::TokenAlreadySpent));
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+        assert_eq!(b.pol_status().unwrap().outstanding_sat, 1024);
+
+        // After (simulated) out-of-band verification that the payout
+        // definitively failed, the operator releases the reservation.
+        b.reconcile_release_reserved_melt(&melt_quote.quote).unwrap();
+        let q = b.get_melt_quote(&melt_quote.quote).await.unwrap();
+        assert_eq!(q.state, QuoteState::Unpaid);
+        let swapped = b
+            .swap(SwapRequest {
+                inputs: proofs,
+                outputs: outputs_for(1024, "unkm3"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            swapped.signatures.iter().map(|s| s.amount).sum::<u64>(),
+            1024
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_melt_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mint.sqlite");
+        let config = live_config();
+        let ark = Arc::new(FailingPayoutArk {
+            inner: MockArkClient::new(config.ark.default_vtxo_expiry),
+            definitive: false,
+        });
+        let signer = build_blind_signer(&config.signatory).unwrap();
+
+        let (melt_quote_id, proofs);
+        {
+            let b = MintBackend::new(
+                config.clone(),
+                ark.clone(),
+                signer.clone(),
+                VtxoInventory::open(&db).unwrap(),
+                PolLedger::open(&db).unwrap(),
+                SpentSecretStore::open(&db).unwrap(),
+                None,
+            );
+            proofs = mint_proofs(&b, "rst").await;
+            let melt_quote = melt_quote_500(&b).await;
+            melt_quote_id = melt_quote.quote.clone();
+            let err = b
+                .melt(MeltBolt11Request {
+                    quote: melt_quote.quote,
+                    inputs: proofs.clone(),
+                    token_ids: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(err, MintError::Ark(_)));
+        }
+
+        // After a restart the quote and its reservation are still there.
+        let b2 = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        );
+        let q = b2.get_melt_quote(&melt_quote_id).await.unwrap();
+        assert_eq!(q.state, QuoteState::Pending);
+        assert_eq!(q.amount, 500);
+        let err = b2
+            .swap(SwapRequest {
+                inputs: proofs.clone(),
+                outputs: outputs_for(1024, "rst2"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::TokenAlreadySpent));
+
+        b2.reconcile_release_reserved_melt(&melt_quote_id).unwrap();
+        b2.swap(SwapRequest {
+            inputs: proofs,
+            outputs: outputs_for(1024, "rst3"),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn successful_melt_settles_persistently() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mint.sqlite");
+        let config = test_config(); // mock payout always succeeds
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        let b = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        );
+
+        let proofs = mint_proofs(&b, "stl").await;
+        let melt_quote = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: "lnbc1".into(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let melted = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(melted.state, QuoteState::Paid);
+        let preimage = melted.payment_preimage.clone().unwrap();
+
+        // Settled quote reports PAID across a restart; inputs stay burned;
+        // PoL outstanding reflects the melt.
+        let b2 = MintBackend::new(
+            test_config(),
+            Arc::new(MockArkClient::new(144)),
+            build_blind_signer(&test_config().signatory).unwrap(),
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        );
+        let q = b2.get_melt_quote(&melt_quote.quote).await.unwrap();
+        assert_eq!(q.state, QuoteState::Paid);
+        let err = b2
+            .swap(SwapRequest {
+                inputs: proofs,
+                outputs: outputs_for(1024, "stl2"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::TokenAlreadySpent));
+        // record_melt_burns burns the full input set (NUT-08 change is out of scope).
+        assert_eq!(b2.pol_status().unwrap().outstanding_sat, 0);
+        let _ = preimage;
+    }
+
+    #[tokio::test]
+    async fn reconcile_settle_completes_melt_after_crash() {
+        // A payout that succeeded but crashed/errored before the settle
+        // commit leaves the quote RESERVED; the operator settles it with the
+        // payment's preimage.
+        let b = live_backend(false);
+        let proofs = mint_proofs(&b, "crs").await;
+        let melt_quote = melt_quote_500(&b).await;
+        let _ = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            b.get_melt_quote(&melt_quote.quote).await.unwrap().state,
+            QuoteState::Pending
+        );
+        assert_eq!(b.list_reserved_melts().unwrap().len(), 1);
+
+        // A wrong preimage is rejected and changes nothing.
+        let err = b
+            .reconcile_settle_reserved_melt(&melt_quote.quote, &hex::encode([0u8; 32]))
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+        assert_eq!(
+            b.get_melt_quote(&melt_quote.quote).await.unwrap().state,
+            QuoteState::Pending
+        );
+
+        // The real preimage settles: quote reports PAID with the preimage
+        // served, inputs are burned, PoL reflects the burn.
+        b.reconcile_settle_reserved_melt(&melt_quote.quote, &hex::encode(TEST_PREIMAGE))
+            .unwrap();
+        let q = b.get_melt_quote(&melt_quote.quote).await.unwrap();
+        assert_eq!(q.state, QuoteState::Paid);
+        assert_eq!(q.payment_preimage, Some(hex::encode(TEST_PREIMAGE)));
+        assert!(b.list_reserved_melts().unwrap().is_empty());
+        let err = b
+            .swap(SwapRequest {
+                inputs: proofs,
+                outputs: outputs_for(1024, "crs2"),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::TokenAlreadySpent));
+        assert_eq!(b.pol_status().unwrap().outstanding_sat, 0);
+    }
+
+    #[tokio::test]
+    async fn one_melt_in_flight_per_invoice() {
+        let b = live_backend(false); // payout outcome stays unknown
+        let proofs_a = mint_proofs(&b, "ifa").await;
+        let proofs_b = mint_proofs(&b, "ifb").await;
+        let invoice = test_invoice(500);
+        let quote_a = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice.clone(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let quote_b = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+
+        let _ = b
+            .melt(MeltBolt11Request {
+                quote: quote_a.quote.clone(),
+                inputs: proofs_a,
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            b.get_melt_quote(&quote_a.quote).await.unwrap().state,
+            QuoteState::Pending
+        );
+
+        // A second melt for the same invoice is refused while the first is
+        // in flight; quote B and its inputs are untouched.
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: quote_b.quote.clone(),
+                inputs: proofs_b.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+        assert_eq!(
+            b.get_melt_quote(&quote_b.quote).await.unwrap().state,
+            QuoteState::Unpaid
+        );
+        b.swap(SwapRequest {
+            inputs: proofs_b,
+            outputs: outputs_for(1024, "ifb2"),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn requote_of_settled_invoice_rejected() {
+        // Live payout mode with a succeeding (mock) Ark payout: the melt
+        // settles, and re-quoting the same invoice is refused.
+        let config = live_config();
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        let b = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open_in_memory().unwrap(),
+            PolLedger::open_in_memory().unwrap(),
+            SpentSecretStore::open_in_memory().unwrap(),
+            None,
+        );
+        let proofs = mint_proofs(&b, "stlq").await;
+        let invoice = test_invoice(500);
+        let quote = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice.clone(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let melted = b
+            .melt(MeltBolt11Request {
+                quote: quote.quote,
+                inputs: proofs,
+                token_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(melted.state, QuoteState::Paid);
+
+        let err = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn concurrent_melts_and_swaps_on_shared_file_db() {
+        // Several stores share one SQLite file over separate connections;
+        // concurrent melts and swaps must not deadlock or die with
+        // SQLITE_BUSY mid-settle.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mint.sqlite");
+        let config = test_config();
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        let b = Arc::new(MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open(&db).unwrap(),
+            PolLedger::open(&db).unwrap(),
+            SpentSecretStore::open(&db).unwrap(),
+            None,
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0..4 {
+            let b = b.clone();
+            handles.push(tokio::spawn(async move {
+                let tag = format!("cc{i}");
+                let proofs = mint_proofs(&b, &tag).await;
+                let quote = b
+                    .melt_quote(MeltQuoteBolt11Request {
+                        request: format!("lnbc1{i}"),
+                        unit: "sat".into(),
+                    })
+                    .await
+                    .unwrap();
+                b.melt(MeltBolt11Request {
+                    quote: quote.quote,
+                    inputs: proofs,
+                    token_ids: None,
+                })
+                .await
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // Two concurrent melts of the SAME quote: exactly one wins.
+        let proofs = mint_proofs(&b, "ccd").await;
+        let quote = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: "lnbc1x".into(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let (b1, b2) = (b.clone(), b.clone());
+        let (q1, q2) = (quote.quote.clone(), quote.quote.clone());
+        let (p1, p2) = (proofs.clone(), proofs.clone());
+        let (r1, r2) = tokio::join!(
+            b1.melt(MeltBolt11Request {
+                quote: q1,
+                inputs: p1,
+                token_ids: None,
+            }),
+            b2.melt(MeltBolt11Request {
+                quote: q2,
+                inputs: p2,
+                token_ids: None,
+            })
+        );
+        let wins = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(wins, 1, "exactly one concurrent melt may settle: {r1:?} {r2:?}");
+    }
+
+    #[tokio::test]
+    async fn settled_sibling_rejected_at_reserve_and_reconcile() {
+        // Two quotes for the SAME invoice created before any settle. The
+        // first melts and settles; the second must be refused at reserve
+        // (inputs untouched) and at reconcile-settle.
+        let config = live_config();
+        let ark = Arc::new(MockArkClient::new(config.ark.default_vtxo_expiry));
+        let signer = build_blind_signer(&config.signatory).unwrap();
+        let b = MintBackend::new(
+            config,
+            ark,
+            signer,
+            VtxoInventory::open_in_memory().unwrap(),
+            PolLedger::open_in_memory().unwrap(),
+            SpentSecretStore::open_in_memory().unwrap(),
+            None,
+        );
+        let proofs_a = mint_proofs(&b, "sba").await;
+        let proofs_b = mint_proofs(&b, "sbb").await;
+        let invoice = test_invoice(500);
+        let quote_a = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice.clone(),
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+        let quote_b = b
+            .melt_quote(MeltQuoteBolt11Request {
+                request: invoice,
+                unit: "sat".into(),
+            })
+            .await
+            .unwrap();
+
+        let melted = b
+            .melt(MeltBolt11Request {
+                quote: quote_a.quote,
+                inputs: proofs_a,
+                token_ids: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(melted.state, QuoteState::Paid);
+
+        // Reserve-time: quote B cannot dispatch a second payout for the
+        // already-paid invoice; its quote and inputs are untouched.
+        let err = b
+            .melt(MeltBolt11Request {
+                quote: quote_b.quote.clone(),
+                inputs: proofs_b.clone(),
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+        assert_eq!(
+            b.get_melt_quote(&quote_b.quote).await.unwrap().state,
+            QuoteState::Unpaid
+        );
+        b.swap(SwapRequest {
+            inputs: proofs_b,
+            outputs: outputs_for(1024, "sbb2"),
+        })
+        .await
+        .unwrap();
+
+        // Reconcile-settle: a preimage valid for the hash must not settle
+        // quote B - the hash was paid by quote A, not by B's payout.
+        let err = b
+            .reconcile_settle_reserved_melt(&quote_b.quote, &hex::encode(TEST_PREIMAGE))
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn reconcile_release_still_guarded_after_settle_paths_added() {
+        // Release only works from RESERVED; a settled quote cannot be
+        // released (which would unburn proofs for a completed payout).
+        let b = live_backend(false);
+        let proofs = mint_proofs(&b, "grd").await;
+        let melt_quote = melt_quote_500(&b).await;
+        let _ = b
+            .melt(MeltBolt11Request {
+                quote: melt_quote.quote.clone(),
+                inputs: proofs,
+                token_ids: None,
+            })
+            .await
+            .unwrap_err();
+        b.reconcile_settle_reserved_melt(&melt_quote.quote, &hex::encode(TEST_PREIMAGE))
+            .unwrap();
+        assert!(b.reconcile_release_reserved_melt(&melt_quote.quote).is_err());
     }
 }

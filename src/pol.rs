@@ -84,14 +84,21 @@ pub struct PolLedger {
 
 impl PolLedger {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_connection(Connection::open(path)?)
+        Self::from_connection(Connection::open(path)?, true)
     }
 
     pub fn open_in_memory() -> Result<Self> {
-        Self::from_connection(Connection::open_in_memory()?)
+        Self::from_connection(Connection::open_in_memory()?, false)
     }
 
-    fn from_connection(conn: Connection) -> Result<Self> {
+    fn from_connection(conn: Connection, file_backed: bool) -> Result<Self> {
+        // The inventory, PoL ledger and spent store share one database file
+        // over separate connections; wait briefly on lock contention instead
+        // of failing writes mid-flow with SQLITE_BUSY.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        if file_backed {
+            conn.pragma_update(None, "journal_mode", "WAL")?;
+        }
         conn.execute_batch(SCHEMA)?;
         Self::migrate(&conn)?;
         Ok(PolLedger {

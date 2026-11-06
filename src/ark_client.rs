@@ -45,7 +45,17 @@ pub trait ArkClient: Send + Sync {
     async fn estimate_lightning_send_fee_sat(&self, amount_sat: u64) -> Result<u64>;
 
     /// Pay a BOLT11 invoice from the ASP wallet balance; returns payment preimage hex.
-    async fn pay_lightning_invoice(&self, invoice: &str, amount_sat: u64) -> Result<String>;
+    ///
+    /// `attempted_before` is the mint's own record of whether this payment
+    /// hash was already dispatched once (a sibling melt quote reached
+    /// RESERVED/SETTLED/RELEASED). Implementations use it to avoid trusting
+    /// wallet history to be complete when classifying a "failed" status.
+    async fn pay_lightning_invoice(
+        &self,
+        invoice: &str,
+        amount_sat: u64,
+        attempted_before: bool,
+    ) -> Result<String>;
 }
 
 /// Deterministic in-memory mock of an ASP.
@@ -156,7 +166,12 @@ impl ArkClient for MockArkClient {
         Ok((amount_sat / 100).max(1))
     }
 
-    async fn pay_lightning_invoice(&self, invoice: &str, _amount_sat: u64) -> Result<String> {
+    async fn pay_lightning_invoice(
+        &self,
+        invoice: &str,
+        _amount_sat: u64,
+        _attempted_before: bool,
+    ) -> Result<String> {
         let mut hasher = Sha256::new();
         hasher.update(invoice.as_bytes());
         Ok(hex::encode(hasher.finalize()))
