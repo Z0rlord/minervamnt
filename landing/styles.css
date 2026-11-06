@@ -281,6 +281,10 @@ h1 {
   margin-top: 1rem;
 }
 
+.card.legal h3 {
+  color: var(--accent);
+}
+
 .card h3 {
   font-size: 0.9rem;
   font-weight: 600;
