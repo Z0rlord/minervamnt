@@ -48,24 +48,32 @@
     </div>
 
     <h1>Minerva Mint</h1>
-    <p class="tagline">Private ecash. Bitcoin backing. Open infrastructure.</p>
+    <p class="tagline">Cashu ecash, backed by Ark.</p>
 
     <div class="status">
       <span class="status-dot" aria-hidden="true"></span>
-      Temporarily offline
+      Our mint is currently offline
     </div>
 
-    <div class="flow" role="img" aria-label="Bitcoin anchors Ark backing, which backs the issued Cashu tokens">
-      <span class="flow-node">Bitcoin</span>
-      <span class="flow-arrow" aria-hidden="true">&rarr;</span>
-      <span class="flow-node">Ark backing</span>
-      <span class="flow-arrow" aria-hidden="true">&rarr;</span>
-      <span class="flow-node">Cashu tokens</span>
+    <div class="card legal">
+      <h3>Legal notice</h3>
+      <p>Operating a mint may be regulated financial activity in your jurisdiction. Check your local laws and obtain any required licenses before issuing ecash to others. This is experimental software, provided as-is with no warranty; the authors assume no liability.</p>
     </div>
 
     <div class="card">
-      <p>Minerva Mint is an open-source, experimental Cashu ecash mint written in Rust. Users hold private bearer tokens issued by the mint; the mint's backing sits in Ark VTXOs instead of Lightning channel liquidity, and the operator can exit that backing to Bitcoin unilaterally if the Ark service fails.</p>
-      <p>The goal is freedom-tech infrastructure: ecash issuance and redemption on open protocols, with auditable liabilities and no single vendor controlling the full stack.</p>
+      <h3>Run your own mint</h3>
+      <p>Minerva Mint is open-source (AGPL-3.0), experimental Cashu infrastructure written in Rust. Anyone can operate a mint: build the service, point it at your own Bitcoin node and Ark provider, and issue ecash yourself.</p>
+    </div>
+
+    <div class="card">
+      <h3>How it works</h3>
+      <p>Users pay a Lightning invoice and receive private bearer tokens; when they redeem, the mint pays out over Lightning. Standard Cashu protocol, custodial ecash, as with any Cashu mint.</p>
+    </div>
+
+    <div class="card">
+      <h3>Why Minerva</h3>
+      <p><strong>Reserves in Ark, not a Lightning wallet.</strong> A typical Cashu mint holds its reserves in Lightning channels: keys online, liquidity to manage. Minerva holds reserves in Ark VTXOs, bitcoin the operator can move back on-chain unilaterally if the Ark service fails.</p>
+      <p><strong>Built to be accountable.</strong> A public transparency endpoint reconciles outstanding ecash against the mint's reserves; timestamped liability proofs remain under development. The aim is backing that can be checked, not just trusted.</p>
     </div>
 
     <a class="btn btn-primary repo-btn" href="https://github.com/Z0rlord/minervamnt" rel="noopener noreferrer">View the source</a>
