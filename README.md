@@ -123,10 +123,18 @@ tunnel, or private network. The mint only needs a standard JSON-RPC endpoint.
 | ------ | ---- | --- |
 | GET | `/v1/info` | NUT-06 |
 | POST | `/v1/mint/quote/bolt11` | NUT-04 |
+| GET | `/v1/mint/quote/bolt11/{quote_id}` | NUT-04 |
 | POST | `/v1/mint/bolt11` | NUT-04 |
 | POST | `/v1/melt/quote/bolt11` | NUT-05 |
-| POST | `/v1/melt/bolt11` | NUT-05 |
+| GET | `/v1/melt/quote/bolt11/{quote_id}` | NUT-05, NUT-08 change recovery |
+| POST | `/v1/melt/bolt11` | NUT-05, NUT-08 change |
 | POST | `/v1/swap` | NUT-03 |
+
+NUT-08 change returns unused fee reserve through wallet-supplied blank
+outputs and can be recovered from the melt quote endpoint after a lost
+response. Returns are limited by the supplied outputs. The charged payout
+fee is capped at the reserve; when the backend cannot report the actual
+fee, the mint charges zero and absorbs that cost.
 
 ### Ark extensions
 
@@ -144,6 +152,7 @@ tunnel, or private network. The mint only needs a standard JSON-RPC endpoint.
 | GET | `/v1/pol/status` | Current PoL epoch totals |
 | GET | `/v1/pol/roots/{keyset_id}` | Closed epoch Merkle roots |
 | GET | `/v1/pol/ots/{epoch_day}` | OpenTimestamps proof for an epoch |
+| GET | `/v1/receipts/{quote_id}` | Signed receipts for a mint or melt quote |
 | GET | `/health` | ASP connectivity, reserve, optional Bitcoin sync |
 
 ## Trust model (summary)
@@ -157,6 +166,14 @@ Minerva implements **dual attestation**:
 - **Signatory policy** — blind signing gated on paid quote + VTXO allocation.
 - **V-PACK verification** — structural checks on boarded VTXOs (`scaffold` or
   `vpack` mode via [libvpack-rs](https://github.com/jgmcalpine/libvpack-rs)).
+- **Signed receipts** — mint/melt receipts record quote amounts and
+  outcomes, signed (BIP-340) and anchored in the PoL epochs
+  (`GET /v1/receipts/{quote_id}`). Bookkeeping failures can delay receipt
+  issuance or anchoring. Receipts are the mint's own statements, not
+  independent solvency attestations, and do not bind input proofs or change
+  outputs. Quote ids are bearer secrets: anyone holding one can read its
+  quote and recover its NUT-08 change (see
+  [docs/reserve-settle-receipts.md](docs/reserve-settle-receipts.md)).
 
 Full spec: [docs/trust-model.md](docs/trust-model.md)
 
@@ -197,6 +214,8 @@ Never commit RPC passwords, ASP keys, or tunnel tokens to git.
 | CDK BDHKE + remote signatory (`BlindSigner`) | Done |
 | Exit claim automation (barkd wallet API) | Done |
 | Signet melt payout via barkd lightning pay | Done (signet) |
+| NUT-08 change outputs for unused fee reserve | Done |
+| Signed mint/melt receipts chained into PoL epochs | Done |
 | Mainnet ASP hardening + melt at scale | Planned |
 | NUT-20 signed quotes | Planned |
 | User-delivered V-PACK at mint | Planned |

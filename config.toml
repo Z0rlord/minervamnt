@@ -36,6 +36,13 @@ refresh_interval_secs = 60
 # inherit | mock | barkd — inherit follows ark.backend
 backend = "inherit"
 
+[receipts]
+# Env var holding the 32-byte hex key that signs mint/melt receipts
+# (docs/reserve-settle-receipts.md). Unset falls back to a deterministic,
+# publicly known dev key ONLY when ark.backend = "mock"; any real backend
+# refuses to start without it.
+key_env = "RECEIPT_SIGNING_KEY_HEX"
+
 [signatory]
 backend = "mock"
 # remote: cdk-signatory gRPC (production)

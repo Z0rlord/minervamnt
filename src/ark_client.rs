@@ -10,16 +10,28 @@ use crate::ark_barkd::BarkdArkClient;
 use crate::config::ArkConfig;
 use crate::error::{MintError, Result};
 use crate::types::{ExitResult, Vtxo};
-use std::sync::Arc;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 /// Bitcoin mainnet averages one block per ~600 seconds.
 const SECONDS_PER_BLOCK: u64 = 600;
+
+/// Result of a confirmed Lightning payout.
+#[derive(Debug)]
+pub struct PayoutResult {
+    /// Payment preimage (hex), verified against the invoice's payment hash.
+    pub preimage: String,
+    /// The fee the wallet actually paid, when it reports one. `None` means
+    /// the fee was not measured; the mint then charges no fee and returns
+    /// the whole reserve as NUT-08 change, because an unmeasured fee is
+    /// never charged to the client (docs/reserve-settle-receipts.md).
+    pub fee_paid_sat: Option<u64>,
+}
 
 #[async_trait]
 pub trait ArkClient: Send + Sync {
@@ -44,7 +56,9 @@ pub trait ArkClient: Send + Sync {
     /// Estimate the wallet fee (sat) to pay a Lightning invoice of `amount_sat`.
     async fn estimate_lightning_send_fee_sat(&self, amount_sat: u64) -> Result<u64>;
 
-    /// Pay a BOLT11 invoice from the ASP wallet balance; returns payment preimage hex.
+    /// Pay a BOLT11 invoice from the ASP wallet balance; returns the payout
+    /// result (verified preimage, plus the measured fee when the wallet
+    /// reports one).
     ///
     /// `attempted_before` is the mint's own record of whether this payment
     /// hash was already dispatched once (a sibling melt quote reached
@@ -55,7 +69,7 @@ pub trait ArkClient: Send + Sync {
         invoice: &str,
         amount_sat: u64,
         attempted_before: bool,
-    ) -> Result<String>;
+    ) -> Result<PayoutResult>;
 }
 
 /// Deterministic in-memory mock of an ASP.
@@ -171,10 +185,14 @@ impl ArkClient for MockArkClient {
         invoice: &str,
         _amount_sat: u64,
         _attempted_before: bool,
-    ) -> Result<String> {
+    ) -> Result<PayoutResult> {
         let mut hasher = Sha256::new();
         hasher.update(invoice.as_bytes());
-        Ok(hex::encode(hasher.finalize()))
+        Ok(PayoutResult {
+            preimage: hex::encode(hasher.finalize()),
+            // The mock moves no real funds: the measured fee is zero.
+            fee_paid_sat: Some(0),
+        })
     }
 }
 

@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub melt: MeltConfig,
+    #[serde(default)]
+    pub receipts: ReceiptsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,6 +253,26 @@ impl Default for MeltConfig {
     fn default() -> Self {
         MeltConfig {
             backend: default_melt_backend(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReceiptsConfig {
+    /// Environment variable holding the 32-byte hex receipt signing key.
+    /// Unset falls back to a deterministic dev key (mock convention).
+    #[serde(default = "default_receipt_key_env")]
+    pub key_env: String,
+}
+
+fn default_receipt_key_env() -> String {
+    "RECEIPT_SIGNING_KEY_HEX".into()
+}
+
+impl Default for ReceiptsConfig {
+    fn default() -> Self {
+        ReceiptsConfig {
+            key_env: default_receipt_key_env(),
         }
     }
 }

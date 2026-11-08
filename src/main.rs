@@ -10,6 +10,7 @@ use minerva_mint::blind_signer::build_blind_signer;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::ots::HttpOtsStamper;
 use minerva_mint::pol::PolLedger;
+use minerva_mint::receipts::{ReceiptSigner, ReceiptStore};
 use minerva_mint::spent_store::SpentSecretStore;
 use minerva_mint::tasks::{
     run_health_monitor, run_ots_upgrade_worker, run_pol_epoch_worker, run_refresh_scheduler,
@@ -37,14 +38,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if std::env::args().nth(1).as_deref() == Some("reconcile") {
-        return reconcile_command(&config);
+        return reconcile_command(&config).await;
     }
 
-    let verify_mode = VtxoVerifyMode::parse(&config.trust.vtxo_verify_mode)
-        .unwrap_or(VtxoVerifyMode::Scaffold);
+    let verify_mode =
+        VtxoVerifyMode::parse(&config.trust.vtxo_verify_mode).unwrap_or(VtxoVerifyMode::Scaffold);
     let inventory = VtxoInventory::open_with_mode(&config.database.path, verify_mode)?;
     let pol = PolLedger::open(&config.database.path)?;
     let spent = SpentSecretStore::open(&config.database.path)?;
+    let receipts = ReceiptStore::open(&config.database.path)?;
+    // The public dev receipt key is only tolerated against the mock ASP;
+    // any real backend fails closed on a missing key.
+    let receipt_signer =
+        ReceiptSigner::from_env_or_dev(&config.receipts.key_env, config.ark.backend == "mock")
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let ots: Option<Arc<dyn minerva_mint::ots::OtsStamper>> = if config.trust.ots.enabled {
         match HttpOtsStamper::new(config.trust.ots.calendar_urls.clone()) {
@@ -68,18 +75,23 @@ async fn main() -> anyhow::Result<()> {
         inventory,
         pol,
         spent,
+        receipts,
+        receipt_signer,
         ots,
     ));
     backend.init_keysets().await?;
+    // Re-anchor any receipts whose PoL epoch event was lost to a crash
+    // between the two writes.
+    backend.recover_receipt_anchors()?;
+    // Re-finalize settled melt quotes whose backing release or change
+    // signing was lost to a crash or operator bookkeeping failure.
+    backend.recover_pending_finalize().await?;
 
     tokio::spawn(run_refresh_scheduler(
         backend.clone(),
         Duration::from_secs(config.scheduler.refresh_interval_secs),
     ));
-    tokio::spawn(run_health_monitor(
-        backend.clone(),
-        Duration::from_secs(60),
-    ));
+    tokio::spawn(run_health_monitor(backend.clone(), Duration::from_secs(60)));
     if config.trust.pol_enabled {
         tokio::spawn(run_pol_epoch_worker(
             backend.clone(),
@@ -112,10 +124,12 @@ async fn main() -> anyhow::Result<()> {
 /// the payout definitively failed or never started, or the mint's backing
 /// is spent twice. SETTLE burns the reserved proofs: only for a payout that
 /// actually completed, and the preimage is checked against the quote's
-/// payment hash.
-fn reconcile_command(config: &AppConfig) -> anyhow::Result<()> {
-    use minerva_mint::mint_backend::verify_melt_preimage;
-
+/// payment hash. Both go through the same MintBackend paths as the service
+/// so receipts, PoL records and NUT-08 change stay consistent; settle signs
+/// the persisted blank outputs (no fee measurement exists on this path, so
+/// the full reserve returns as change) and the wallet recovers the change
+/// from the quote check endpoint.
+async fn reconcile_command(config: &AppConfig) -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(2).collect();
     let valid = matches!(args.len(), 1 if args[0] == "list")
         || matches!(args.len(), 2 if args[0] == "release")
@@ -131,10 +145,43 @@ fn reconcile_command(config: &AppConfig) -> anyhow::Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
+    let verify_mode =
+        VtxoVerifyMode::parse(&config.trust.vtxo_verify_mode).unwrap_or(VtxoVerifyMode::Scaffold);
+    let inventory = VtxoInventory::open_with_mode(&config.database.path, verify_mode)?;
+    let pol = PolLedger::open(&config.database.path)?;
     let spent = SpentSecretStore::open(&config.database.path)?;
+    let receipts = ReceiptStore::open(&config.database.path)?;
+    let receipt_signer =
+        ReceiptSigner::from_env_or_dev(&config.receipts.key_env, config.ark.backend == "mock")
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let ark = build_ark_client(&config.ark).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let signer = build_blind_signer(&config.signatory).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let backend = MintBackend::new(
+        config.clone(),
+        ark,
+        signer,
+        inventory,
+        pol,
+        spent,
+        receipts,
+        receipt_signer,
+        None,
+    );
+    // Re-anchor orphaned receipts and re-finalize settled melts whose
+    // backing release or change signing was lost to a crash, so the
+    // operator does not have to repair either by hand. Keysets (needed
+    // for change signing) are only loaded when an action requires them.
+    backend.recover_receipt_anchors()?;
+    if args[0] != "list" {
+        backend.init_keysets().await?;
+        let recovered = backend.recover_pending_finalize().await?;
+        if recovered > 0 {
+            eprintln!("re-finalized {recovered} settled melt quote(s)");
+        }
+    }
     match args.len() {
         1 if args[0] == "list" => {
-            let reserved = spent.list_reserved_melts()?;
+            let reserved = backend.list_reserved_melts()?;
             if reserved.is_empty() {
                 println!("no reserved melt quotes");
             }
@@ -155,33 +202,14 @@ fn reconcile_command(config: &AppConfig) -> anyhow::Result<()> {
                  Only proceed after verifying out-of-band that the payout \
                  definitively failed or never started."
             );
-            spent.release_melt(&args[1])?;
+            backend.reconcile_release_reserved_melt(&args[1])?;
             println!("released {}", args[1]);
         }
         3 if args[0] == "settle" => {
-            let quote = spent
-                .melt_quote(&args[1])?
-                .ok_or_else(|| anyhow::anyhow!("quote not found: {}", args[1]))?;
-            verify_melt_preimage(&args[2], quote.payment_hash.as_deref())
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            // A preimage verifies against the payment HASH, not this quote's
-            // payout: refuse to settle a second quote for an invoice another
-            // melt already settled.
-            if let Some(hash) = &quote.payment_hash {
-                if spent.has_settled_melt_for_hash_excluding(hash, &args[1])? {
-                    return Err(anyhow::anyhow!(
-                        "invoice for quote {} was already settled by another melt; refusing to settle a second quote for the same payment",
-                        args[1]
-                    ));
-                }
-            }
-            let inputs = spent.reserved_inputs(&args[1])?;
-            spent.settle_melt(&args[1], &args[2])?;
-            let pol = PolLedger::open(&config.database.path)?;
-            for (secret, keyset_id, amount) in &inputs {
-                pol.record_burn(keyset_id, secret, *amount)?;
-            }
-            println!("settled {} ({} inputs burned)", args[1], inputs.len());
+            backend
+                .reconcile_settle_reserved_melt(&args[1], &args[2])
+                .await?;
+            println!("settled {}", args[1]);
         }
         _ => unreachable!("usage validated above"),
     }

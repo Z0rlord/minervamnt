@@ -19,6 +19,7 @@ pub mod keyset_cache;
 pub mod mint_backend;
 pub mod ots;
 pub mod pol;
+pub mod receipts;
 pub mod signatory;
 pub mod spent_store;
 pub mod tasks;

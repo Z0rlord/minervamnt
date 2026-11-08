@@ -14,6 +14,7 @@ use minerva_mint::ark_client::MockArkClient;
 use minerva_mint::blind_signer::build_blind_signer;
 use minerva_mint::mint_backend::MintBackend;
 use minerva_mint::pol::PolLedger;
+use minerva_mint::receipts::{ReceiptSigner, ReceiptStore};
 use minerva_mint::spent_store::SpentSecretStore;
 use minerva_mint::vtxo_inventory::VtxoInventory;
 use minerva_mint::AppConfig;
@@ -30,6 +31,8 @@ fn test_backend() -> Arc<MintBackend> {
         VtxoInventory::open_in_memory().unwrap(),
         PolLedger::open_in_memory().unwrap(),
         SpentSecretStore::open_in_memory().unwrap(),
+        ReceiptStore::open_in_memory().unwrap(),
+        ReceiptSigner::dev(),
         None,
     ))
 }
@@ -350,6 +353,8 @@ async fn melt_releases_vtxo_backing_with_token_ids() {
         VtxoInventory::open_in_memory().unwrap(),
         PolLedger::open_in_memory().unwrap(),
         SpentSecretStore::open_in_memory().unwrap(),
+        ReceiptStore::open_in_memory().unwrap(),
+        ReceiptSigner::dev(),
         None,
     ));
     let app = router(backend);
@@ -427,4 +432,96 @@ async fn melt_releases_vtxo_backing_with_token_ids() {
     let (status, kept) = request(&app, "GET", &format!("/ark/vtxo/{quote_a_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(kept["status"], "active");
+}
+
+#[tokio::test]
+async fn melt_returns_nut08_change_and_signed_receipt_over_http() {
+    let app = router(test_backend());
+
+    // Mint 1024 sat of proofs.
+    let (_, quote) = request(
+        &app,
+        "POST",
+        "/v1/mint/quote/bolt11",
+        Some(json!({ "amount": 1024, "unit": "sat" })),
+    )
+    .await;
+    let mint_quote_id = quote["quote"].as_str().unwrap().to_string();
+    let (status, minted) = request(
+        &app,
+        "POST",
+        "/v1/mint/bolt11",
+        Some(json!({
+            "quote": mint_quote_id,
+            "outputs": [{ "amount": 1024, "id": KEYSET_ID, "B_": "02blinded-change" }],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let sig = &minted["signatures"][0];
+
+    // Melt quote: mock mode "lnbc1" is a 500 sat invoice with a 5 sat reserve.
+    let (_, melt_quote) = request(
+        &app,
+        "POST",
+        "/v1/melt/quote/bolt11",
+        Some(json!({ "request": "lnbc1", "unit": "sat" })),
+    )
+    .await;
+    let melt_quote_id = melt_quote["quote"].as_str().unwrap().to_string();
+
+    // Melt with NUT-08 blank outputs; mock payout measures a zero fee, so
+    // 1024 - 500 = 524 comes back as change (4 + 8 + 512, ascending).
+    let (status, melted) = request(
+        &app,
+        "POST",
+        "/v1/melt/bolt11",
+        Some(json!({
+            "quote": melt_quote_id,
+            "inputs": [{
+                "amount": 1024, "id": KEYSET_ID,
+                "secret": "secret-change", "C": sig["C_"],
+            }],
+            "outputs": [
+                { "amount": 0, "id": KEYSET_ID, "B_": "02blank-1" },
+                { "amount": 0, "id": KEYSET_ID, "B_": "02blank-2" },
+                { "amount": 0, "id": KEYSET_ID, "B_": "02blank-3" },
+            ],
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(melted["state"], "PAID");
+    let change = melted["change"].as_array().unwrap();
+    let amounts: Vec<u64> = change
+        .iter()
+        .map(|c| c["amount"].as_u64().unwrap())
+        .collect();
+    assert_eq!(amounts, vec![4, 8, 512]);
+
+    // The mint's info publishes NUT-08 support and the receipt pubkey.
+    let (_, info) = request(&app, "GET", "/v1/info", None).await;
+    assert_eq!(info["nuts"]["8"]["supported"], true);
+    assert_eq!(info["receipt_pubkey"].as_str().unwrap().len(), 64);
+
+    // The settled melt has a signed receipt; the mint quote has its own.
+    let (status, receipts) =
+        request(&app, "GET", &format!("/v1/receipts/{melt_quote_id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let receipts = receipts["receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0]["kind"], "melt");
+    assert_eq!(receipts[0]["outcome"], "settled");
+    assert_eq!(receipts[0]["amount_sat"], 500);
+    assert_eq!(receipts[0]["fee_charged_sat"], 0);
+    assert_eq!(receipts[0]["change_sat"], 524);
+    assert_eq!(receipts[0]["receipt_hash"].as_str().unwrap().len(), 64);
+
+    let (_, mint_receipts) =
+        request(&app, "GET", &format!("/v1/receipts/{mint_quote_id}"), None).await;
+    let mint_receipts = mint_receipts["receipts"].as_array().unwrap();
+    assert_eq!(mint_receipts.len(), 1);
+    assert_eq!(mint_receipts[0]["outcome"], "issued");
+    // The melt receipt chains onto the mint receipt.
+    assert_eq!(receipts[0]["prev_hash"], mint_receipts[0]["receipt_hash"]);
 }

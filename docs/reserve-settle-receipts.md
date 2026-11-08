@@ -1,7 +1,10 @@
 # Design note: reserve, settle, release, and signed receipts
 
-Status: proposal. Design only, no code change. The mint service stays offline
-and nothing here changes the deployed behavior.
+Status: implemented. Step 1 landed in 8882683 (persisted melt quotes with
+RESERVED/SETTLED/RELEASED). Steps 2 and 3 landed after it: NUT-08 change
+outputs for unused `fee_reserve`, and signed receipts chained into PoL
+epochs. The mint service stays offline; nothing here changes the deployed
+behavior.
 
 ## Origin and attribution
 
@@ -73,14 +76,26 @@ State machine for a melt:
 ## Signed receipts (mint side)
 
 Add an optional signed receipt for mint and melt operations: quote id, unit,
-amount, fee actually charged, reservation outcome, timestamp, keyset id.
-Sign it with a key whose public part is published in `/v1/info`. Chain the
-receipt hash into the next PoL epoch so a receipt can be checked against a
-published root. This extends the existing PoL design rather than adding a
+amount, fee charged, total retained, reservation outcome, timestamp, keyset
+id. Sign it with a key whose public part is published in `/v1/info`. Chain
+the receipt hash into the next PoL epoch so a receipt can be checked against
+a published root. This extends the existing PoL design rather than adding a
 second ledger.
 
 Receipts are evidence of what the mint says it did. They are not an
-independent solvency attestation.
+independent solvency attestation. A receipt binds the quote id, amounts and
+outcome only: it does not bind the input proofs or the change outputs, and
+it proves a payment event happened, not who the caller is.
+
+The fee and the total retained are distinct fields. `fee_charged_sat` is
+what the mint charged under its rule (`min(fee_reserve, measured fee)`,
+zero when no measurement exists). `retained_sat` is everything the mint
+kept above the invoice amount: the charged fee plus any unreturned reserve
+(dust from too few blank outputs, or the whole reserve when the wallet
+provided none). Conservation on a settled melt is therefore
+`input_total = amount + retained + change` with
+`retained = fee_charged + unreturned surplus` - the fee is inside
+`retained`, never added a second time.
 
 ## Client and gateway side (out of scope for the mint crate)
 
@@ -94,6 +109,18 @@ a mint, not to the mint:
 
 If Minerva ever ships a wallet or gateway, this is the reference. It should be
 a separate crate or repo, not part of the mint.
+
+## Bearer endpoints and what they expose
+
+Quote ids are random UUIDv4 bearer capabilities: whoever holds a quote id
+can read its state and, for a settled melt, its change signatures from the
+quote check endpoint. The quote check may also complete a settled melt's
+finalization (change signing, backing release, receipt); those writes are
+idempotent, so a repeated or racing check converges to the same state.
+`GET /v1/receipts/{quote_id}` returns that quote's receipts, whose
+`prev_hash` links form one global chain: anyone who can enumerate quote
+ids could observe the mint's aggregate receipt volume. Quote ids are
+unguessable, so treat them as secrets on the wire and in logs.
 
 ## Category rule
 
@@ -125,6 +152,49 @@ solvency attestation, and the README license badge disagreeing with the
 ## Suggested next steps
 
 1. Persist melt quotes and add `RESERVED/SETTLED/RELEASED` with tests for
-   payout failure and restart.
-2. Add NUT-08 change for unused `fee_reserve`.
-3. Receipt format and signing key, then chain into PoL epochs.
+   payout failure and restart. Done in 8882683.
+2. Add NUT-08 change for unused `fee_reserve`. Done. Blank outputs carry
+   amount 0 on the request per NUT-08 and the mint imprints the ascending
+   power-of-two decomposition in output order. `fee_charged` is the backend
+   measurement when one exists; a backend that reports no actual fee charges
+   0 and the full reserve returns as change, per the rule above. The barkd
+   wallet HTTP API is such a backend: it reports only a pre-payment
+   estimate, never the actual fee paid, so the seam for real fee
+   measurement stays open there.
+3. Receipt format and signing key, then chain into PoL epochs. Done
+   (`src/receipts.rs`): BIP-340 schnorr over a canonical payload, key
+   published in `/v1/info`, receipt hashes recorded in the PoL epoch root.
+   Post-settle finalization has two halves with different failure
+   handling. The wallet half (`ensure_melt_change`) signs the NUT-08
+   change onto the persisted blank outputs (no measurement, no charge);
+   its errors propagate and every quote check retries it. The operator
+   half (`finalize_melt_bookkeeping`) releases VTXO backing for the NET
+   burn only (the reissued change keeps its backing) and issues the
+   settled receipt; its failures are logged as a pending status and
+   retried by every quote check and by the startup and `reconcile` CLI
+   sweeps (`recover_pending_finalize`), so a bookkeeping failure never
+   makes the wallet's change inaccessible. The reconcile path runs both
+   halves and propagates.
+   Each step keys off durable state, not in-memory ordering. Persisted
+   signatures are the change anchor. The backing release is logged per
+   quote in the same transaction as the deallocation
+   (`backing_releases`), so a crash between the release and the flag
+   write, or a racing finalization, replays the recorded amounts instead
+   of releasing twice; the named-token variant is all-or-nothing, so a
+   release the tokens cannot cover moves nothing and stays pending for
+   operator repair (over-reserve, never under-reserve); a FIFO release
+   that covers nothing records a durable zero row, so a later retry
+   cannot release backing allocated after the melt. While a release is
+   pending the wallet's change is served normally, the settled receipt
+   is issued only after the release succeeds, and every quote check and
+   the startup/CLI sweeps keep retrying until an operator repairs the
+   backing. A settled or
+   released receipt is unique per quote (a partial unique index), and
+   the receipt append takes the write lock up front so a racing
+   finalization returns the existing receipt instead of forking the
+   chain. The PoL change mint is recorded by deterministic event id.
+   Signing is deterministic and the first persisted write wins. A wallet
+   that sends no blank outputs opts out of change; the surplus stays with
+   the mint. Receipts missing their PoL anchor after a crash are
+   re-anchored at startup and by the `reconcile` CLI
+   (`recover_receipt_anchors`).

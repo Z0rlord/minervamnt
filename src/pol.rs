@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS pol_burn_events (
     epoch_day    TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS pol_receipt_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyset_id    TEXT NOT NULL,
+    receipt_hash TEXT NOT NULL UNIQUE,
+    kind         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    epoch_day    TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pol_epochs (
     epoch_day    TEXT NOT NULL,
     keyset_id    TEXT NOT NULL,
@@ -115,10 +124,16 @@ impl PolLedger {
             conn.execute("ALTER TABLE pol_epochs ADD COLUMN ots_proof_hex TEXT", [])?;
         }
         if !cols.contains(&"ots_calendar_url".to_string()) {
-            conn.execute("ALTER TABLE pol_epochs ADD COLUMN ots_calendar_url TEXT", [])?;
+            conn.execute(
+                "ALTER TABLE pol_epochs ADD COLUMN ots_calendar_url TEXT",
+                [],
+            )?;
         }
         if !cols.contains(&"ots_stamped_at".to_string()) {
-            conn.execute("ALTER TABLE pol_epochs ADD COLUMN ots_stamped_at INTEGER", [])?;
+            conn.execute(
+                "ALTER TABLE pol_epochs ADD COLUMN ots_stamped_at INTEGER",
+                [],
+            )?;
         }
         Ok(())
     }
@@ -172,6 +187,71 @@ impl PolLedger {
                 Self::now() as i64,
                 epoch_day,
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Idempotent variant of [`Self::record_mint`] for events that recovery
+    /// paths may legitimately replay (NUT-08 change issuance after a crash
+    /// or a concurrent quote check): the same event id records once and
+    /// later calls are no-ops. Returns whether this call inserted the
+    /// event. Mint quote issuance keeps the strict duplicate-rejecting
+    /// [`Self::record_mint`], where a repeated id signals a real bug.
+    pub fn record_mint_once(
+        &self,
+        keyset_id: &str,
+        quote_id: &str,
+        amount_sat: u64,
+        outputs_b: &[String],
+    ) -> Result<bool> {
+        let epoch_day = Self::current_epoch_day();
+        let mut b_hasher = Sha256::new();
+        for b in outputs_b {
+            b_hasher.update(b.as_bytes());
+        }
+        let b_hash = hex::encode(b_hasher.finalize());
+
+        let conn = self.conn.lock().unwrap();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO pol_mint_events (keyset_id, quote_id, amount_sat, b_hash, created_at, epoch_day)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                keyset_id,
+                quote_id,
+                amount_sat as i64,
+                b_hash,
+                Self::now() as i64,
+                epoch_day,
+            ],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    /// Whether a receipt hash is already anchored in the epoch events.
+    pub fn has_receipt_event(&self, receipt_hash: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM pol_receipt_events WHERE receipt_hash = ?1",
+            params![receipt_hash],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Log a signed receipt (see `receipts.rs`) so its hash is committed
+    /// into the epoch root at closure. Receipts carry no liability; they
+    /// contribute to the epoch's event hashes only, so a receipt can be
+    /// checked against a published root.
+    pub fn record_receipt(&self, keyset_id: &str, receipt_hash: &str, kind: &str) -> Result<()> {
+        let epoch_day = Self::current_epoch_day();
+        // Idempotent: a receipt hash is content-derived, so re-recording
+        // it (recovery after a crash between the receipt write and this
+        // anchor) is the same event, not a duplicate.
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO pol_receipt_events (keyset_id, receipt_hash, kind, created_at, epoch_day)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![keyset_id, receipt_hash, kind, Self::now() as i64, epoch_day,],
         )?;
         Ok(())
     }
@@ -300,11 +380,12 @@ impl PolLedger {
                  WHERE epoch_day = ?1 AND keyset_id = ?2
                  UNION ALL
                  SELECT 'burn:' || secret_hash || ':' || amount_sat FROM pol_burn_events
+                 WHERE epoch_day = ?1 AND keyset_id = ?2
+                 UNION ALL
+                 SELECT 'receipt:' || receipt_hash FROM pol_receipt_events
                  WHERE epoch_day = ?1 AND keyset_id = ?2",
             )?
-            .query_map(params![epoch_day, keyset_id], |r| {
-                r.get::<_, String>(0)
-            })?
+            .query_map(params![epoch_day, keyset_id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         event_hashes.sort();
 
@@ -540,10 +621,52 @@ mod tests {
         pol.record_burn(KEYSET_ID, "s1", 10).unwrap();
 
         assert_eq!(pol.status(KEYSET_ID).unwrap().outstanding_sat, 30);
-        assert_eq!(
-            pol.status("00remotekeyset01").unwrap().outstanding_sat,
-            25
-        );
+        assert_eq!(pol.status("00remotekeyset01").unwrap().outstanding_sat, 25);
+    }
+
+    #[test]
+    fn receipt_events_change_epoch_root() {
+        let day = PolLedger::current_epoch_day();
+        let pol = PolLedger::open_in_memory().unwrap();
+        pol.record_mint(KEYSET_ID, "q1", 64, &["02b".into()])
+            .unwrap();
+        let root_without = pol
+            .close_epoch(&day, KEYSET_ID)
+            .unwrap()
+            .expect("closed")
+            .root_hash;
+
+        let pol2 = PolLedger::open_in_memory().unwrap();
+        pol2.record_mint(KEYSET_ID, "q1", 64, &["02b".into()])
+            .unwrap();
+        pol2.record_receipt(KEYSET_ID, &"aa".repeat(32), "mint")
+            .unwrap();
+        let root_with = pol2
+            .close_epoch(&day, KEYSET_ID)
+            .unwrap()
+            .expect("closed")
+            .root_hash;
+
+        assert_ne!(root_without, root_with);
+        // Re-recording the same content-derived receipt hash is the same
+        // event: idempotent, not an error (recovery relies on it).
+        pol2.record_receipt(KEYSET_ID, &"aa".repeat(32), "mint")
+            .unwrap();
+        assert!(pol2.has_receipt_event(&"aa".repeat(32)).unwrap());
+    }
+
+    #[test]
+    fn record_mint_once_is_idempotent_for_replayed_events() {
+        // The NUT-08 change event can be replayed by crash recovery or a
+        // concurrent quote check; it must record exactly once.
+        let pol = PolLedger::open_in_memory().unwrap();
+        assert!(pol
+            .record_mint_once(KEYSET_ID, "q1#change", 64, &["02b".into()])
+            .unwrap());
+        assert!(!pol
+            .record_mint_once(KEYSET_ID, "q1#change", 64, &["02b".into()])
+            .unwrap());
+        assert_eq!(pol.status(KEYSET_ID).unwrap().outstanding_sat, 64);
     }
 
     #[test]

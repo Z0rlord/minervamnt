@@ -207,6 +207,13 @@ pub struct MeltQuoteBolt11Response {
     /// Payment preimage once the melt has settled (NUT-23).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_preimage: Option<String>,
+    /// NUT-08 change signatures once the melt has settled, served from the
+    /// mint's persistence so a wallet that lost the POST melt response (or
+    /// whose melt was settled by operator reconcile) can still recover its
+    /// change. Same signatures, in the same output order, as the POST
+    /// response carried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<Vec<BlindSignature>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +223,11 @@ pub struct MeltBolt11Request {
     /// Mint quote UUIDs whose VTXO backing should be released on successful melt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_ids: Option<Vec<String>>,
+    /// NUT-08 blank outputs: blinded messages with undetermined amounts the
+    /// mint imprints with the overpaid fee return. Wallets set `amount` to 0;
+    /// the mint ignores it and assigns power-of-two amounts itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<BlindedMessage>>,
 }
 
 /// NUT-02 keyset entry returned by `GET /v1/keysets`.
@@ -255,6 +267,70 @@ pub struct MeltBolt11Response {
     pub state: QuoteState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment_preimage: Option<String>,
+    /// NUT-08: blind signatures for the overpaid fee return, in the same
+    /// order as the blank outputs they were imprinted on. Only present when
+    /// the wallet provided blank outputs and there is a positive return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<Vec<BlindSignature>>,
+}
+
+// ---------------------------------------------------------------------------
+// Signed receipts (docs/reserve-settle-receipts.md)
+// ---------------------------------------------------------------------------
+
+/// A signed statement of what the mint did for one quote: issuance for a
+/// mint, settlement or release for a melt. Receipts are chained
+/// (`prev_hash`) and the hash is recorded in the PoL epoch log, so a receipt
+/// can be checked against a published epoch root.
+///
+/// A receipt binds the quote id, amounts and outcome only. It does not
+/// bind the input proofs or the change outputs, it proves a payment event
+/// happened rather than who the caller was, and it is evidence of what the
+/// mint says it did, not an independent solvency attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MintReceipt {
+    pub receipt_id: String,
+    /// `mint` or `melt`.
+    pub kind: String,
+    pub quote_id: String,
+    pub unit: String,
+    /// Mint: issued amount. Melt: invoice amount paid out.
+    pub amount_sat: u64,
+    /// Melt: the fee the mint charged under its rule
+    /// (`min(fee_reserve, measured fee)`, zero when the backend reports no
+    /// measurement). Absent for mints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_charged_sat: Option<u64>,
+    /// Melt: everything the mint kept above the invoice amount
+    /// (`input_total - amount - change`): the charged fee plus any
+    /// unreturned reserve (dust from too few blank outputs, or the full
+    /// reserve when the wallet provided none). Absent for mints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained_sat: Option<u64>,
+    /// Melt: amount returned to the wallet as NUT-08 change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_sat: Option<u64>,
+    /// Mint: `issued`. Melt: `settled` or `released`.
+    pub outcome: String,
+    pub keyset_id: String,
+    pub created_at: u64,
+    /// Hash of the previous receipt in the mint's chain, `genesis` for the
+    /// first.
+    pub prev_hash: String,
+    /// sha256 over the canonical receipt payload (see `receipts.rs`).
+    pub receipt_hash: String,
+    /// BIP-340 schnorr signature (hex) over `receipt_hash` by the mint's
+    /// receipt key.
+    pub signature: String,
+    /// X-only (32-byte, BIP-340) public key (hex) of the mint's receipt
+    /// signing key; also published in `GET /v1/info` as `receipt_pubkey`.
+    pub pubkey: String,
+}
+
+/// `GET /v1/receipts/{quote_id}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiptsResponse {
+    pub receipts: Vec<MintReceipt>,
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +361,9 @@ pub struct MintInfo {
     pub contact: Vec<ContactInfo>,
     pub motd: Option<String>,
     pub nuts: serde_json::Value,
+    /// X-only (32-byte, BIP-340) public key (hex) of the key that signs receipts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt_pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,7 +4,7 @@
 //! a **barkd-compatible wallet daemon** at `ark.wallet_url` for board/refresh/exit.
 //! Run `arkd` locally and expose its wallet REST, or use a bridge sidecar.
 
-use crate::ark_client::ArkClient;
+use crate::ark_client::{ArkClient, PayoutResult};
 use crate::ark_wallet_http::WalletHttpClient;
 use crate::config::ArkConfig;
 use crate::error::{MintError, Result};
@@ -107,7 +107,7 @@ impl ArkClient for ArkadeArkClient {
         invoice: &str,
         amount_sat: u64,
         attempted_before: bool,
-    ) -> Result<String> {
+    ) -> Result<PayoutResult> {
         self.require_wallet()?
             .pay_lightning_invoice(invoice, amount_sat, attempted_before)
             .await

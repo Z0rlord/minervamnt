@@ -138,7 +138,17 @@ mod tests {
         let signer = build_blind_signer(&config.signatory).unwrap();
         let inventory = VtxoInventory::open_in_memory().unwrap();
         let pol = PolLedger::open_in_memory().unwrap();
-        MintBackend::new(config, ark, signer, inventory, pol, SpentSecretStore::open_in_memory().unwrap(), None)
+        MintBackend::new(
+            config,
+            ark,
+            signer,
+            inventory,
+            pol,
+            SpentSecretStore::open_in_memory().unwrap(),
+            crate::receipts::ReceiptStore::open_in_memory().unwrap(),
+            crate::receipts::ReceiptSigner::dev(),
+            None,
+        )
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Live Ark integration via [barkd](https://second.tech/docs/barkd) (Second / Bark).
 
-use crate::ark_client::ArkClient;
+use crate::ark_client::{ArkClient, PayoutResult};
 use crate::ark_wallet_http::WalletHttpClient;
 use crate::config::ArkConfig;
 use crate::error::{MintError, Result};
@@ -70,7 +70,7 @@ impl ArkClient for BarkdArkClient {
         invoice: &str,
         amount_sat: u64,
         attempted_before: bool,
-    ) -> Result<String> {
+    ) -> Result<PayoutResult> {
         self.wallet
             .pay_lightning_invoice(invoice, amount_sat, attempted_before)
             .await

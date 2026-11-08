@@ -10,7 +10,7 @@
 use crate::error::{MintError, Result};
 use crate::types::{Vtxo, VtxoStatus};
 use crate::vtxo_verify::{verify_vtxo, VtxoVerifyMode};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -37,6 +37,18 @@ CREATE TABLE IF NOT EXISTS token_vtxo_map (
 
 CREATE INDEX IF NOT EXISTS idx_vtxo_status_expiry ON vtxo_inventory(status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_map_vtxo ON token_vtxo_map(vtxo_id);
+
+-- Durable record of melt backing releases, keyed by melt quote: the
+-- deallocation and the log row commit in one transaction, so a crash or a
+-- racing finalization replays the recorded release instead of releasing
+-- twice.
+CREATE TABLE IF NOT EXISTS backing_releases (
+    quote_id    TEXT NOT NULL,
+    token_id    TEXT NOT NULL,
+    amount_msat INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (quote_id, token_id)
+);
 "#;
 
 #[derive(Debug, Clone)]
@@ -316,6 +328,155 @@ impl VtxoInventory {
         Ok(release)
     }
 
+    /// Total backing released for a melt quote, if its release was
+    /// recorded (`release_backing_for_quote*` commit deallocation and log
+    /// atomically).
+    fn recorded_release_msat(conn: &Connection, quote_id: &str) -> Result<Option<u64>> {
+        let total: Option<i64> = conn.query_row(
+            "SELECT SUM(amount_msat) FROM backing_releases WHERE quote_id = ?1",
+            params![quote_id],
+            |r| r.get(0),
+        )?;
+        Ok(total.map(|v| v as u64))
+    }
+
+    /// Release up to `amount_msat` of backing across `token_ids` (greedy,
+    /// in order), idempotently keyed by `quote_id`: if this quote's release
+    /// was already recorded, the recorded total is returned and no mapping
+    /// is touched. Otherwise the deallocations and their log rows commit in
+    /// one transaction. All-or-nothing: when the named tokens do not cover
+    /// the amount, nothing is released and the error leaves the quote for
+    /// operator repair (over-reserve, never under-reserve).
+    pub fn release_backing_for_quote(
+        &self,
+        quote_id: &str,
+        token_ids: &[String],
+        amount_msat: u64,
+    ) -> Result<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        // Immediate: the write lock is taken before the replay check, so a
+        // cross-process contender either waits for this release or
+        // serializes behind it and replays - never a stale read racing a
+        // deferred upgrade.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(total) = Self::recorded_release_msat(&tx, quote_id)? {
+            return Ok(total);
+        }
+        if amount_msat == 0 {
+            return Ok(0);
+        }
+        let mut remaining = amount_msat;
+        let mut released = 0u64;
+        for token_id in token_ids {
+            if remaining == 0 {
+                break;
+            }
+            let mapped: Option<i64> = tx
+                .query_row(
+                    "SELECT amount_msat FROM token_vtxo_map WHERE token_id = ?1",
+                    params![token_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let mapped = mapped
+                .ok_or_else(|| MintError::MappingNotFound(token_id.clone()))?
+                as u64;
+            let take = remaining.min(mapped);
+            if take >= mapped {
+                tx.execute(
+                    "DELETE FROM token_vtxo_map WHERE token_id = ?1",
+                    params![token_id],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE token_vtxo_map SET amount_msat = amount_msat - ?1 WHERE token_id = ?2",
+                    params![take as i64, token_id],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO backing_releases (quote_id, token_id, amount_msat, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![quote_id, token_id, take as i64, Self::now() as i64],
+            )?;
+            remaining -= take;
+            released += take;
+        }
+        if remaining > 0 {
+            return Err(MintError::InvalidRequest(format!(
+                "melt backing release for quote {quote_id} short by {remaining} msat; nothing released, operator repair needed"
+            )));
+        }
+        tx.commit()?;
+        Ok(released)
+    }
+
+    /// FIFO variant of [`Self::release_backing_for_quote`] for melts that
+    /// name no tokens (operator PoR mode): oldest mappings first, partial
+    /// release allowed with the shortfall returned in the total. Idempotent
+    /// per quote for the same crash and concurrency reasons.
+    pub fn release_backing_for_quote_fifo(&self, quote_id: &str, amount_msat: u64) -> Result<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        // Immediate for the same cross-process reason as
+        // `release_backing_for_quote`: the replay check runs under the
+        // write lock.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(total) = Self::recorded_release_msat(&tx, quote_id)? {
+            return Ok(total);
+        }
+        if amount_msat == 0 {
+            return Ok(0);
+        }
+        let mut stmt = tx.prepare(
+            "SELECT token_id, amount_msat FROM token_vtxo_map ORDER BY issued_at ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut mappings = Vec::new();
+        while let Some(row) = rows.next()? {
+            mappings.push((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64));
+        }
+        drop(rows);
+        drop(stmt);
+
+        let mut remaining = amount_msat;
+        let mut released = 0u64;
+        for (token_id, mapped_msat) in mappings {
+            if remaining == 0 {
+                break;
+            }
+            let take = remaining.min(mapped_msat);
+            if take >= mapped_msat {
+                tx.execute(
+                    "DELETE FROM token_vtxo_map WHERE token_id = ?1",
+                    params![token_id],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE token_vtxo_map SET amount_msat = amount_msat - ?1 WHERE token_id = ?2",
+                    params![take as i64, token_id],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO backing_releases (quote_id, token_id, amount_msat, created_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![quote_id, token_id, take as i64, Self::now() as i64],
+            )?;
+            remaining -= take;
+            released += take;
+        }
+        if released == 0 {
+            // Durable zero record: without it a later retry has no log of
+            // this quote's release and would deallocate backing allocated
+            // AFTER the melt against the old quote.
+            tx.execute(
+                "INSERT INTO backing_releases (quote_id, token_id, amount_msat, created_at)
+                 VALUES (?1, '', 0, ?2)",
+                params![quote_id, Self::now() as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(released)
+    }
+
     /// Release oldest token mappings until `amount_msat` is covered (operator PoR).
     pub fn deallocate_fifo(&self, amount_msat: u64) -> Result<u64> {
         if amount_msat == 0 {
@@ -575,5 +736,97 @@ mod tests {
             [],
         );
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn quote_keyed_release_is_idempotent_and_all_or_nothing() {
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000)]);
+        inv.allocate_vtxo_for_tokens("tok1", 600_000).unwrap();
+        inv.allocate_vtxo_for_tokens("tok2", 400_000).unwrap();
+
+        // Short release: the named tokens cannot cover the amount, so
+        // nothing moves and the quote is left for operator repair
+        // (over-reserve, never under-reserve).
+        let err = inv
+            .release_backing_for_quote(
+                "q1",
+                &["tok1".to_string(), "tok2".to_string()],
+                1_500_000,
+            )
+            .unwrap_err();
+        assert!(matches!(err, MintError::InvalidRequest(_)));
+        assert_eq!(inv.total_allocated_msat().unwrap(), 1_000_000);
+
+        // Covered release: greedy across the named tokens.
+        let released = inv
+            .release_backing_for_quote(
+                "q1",
+                &["tok1".to_string(), "tok2".to_string()],
+                800_000,
+            )
+            .unwrap();
+        assert_eq!(released, 800_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 200_000);
+
+        // Replay (crash recovery, racing finalize): the recorded total is
+        // returned and no mapping is touched again.
+        let replayed = inv
+            .release_backing_for_quote(
+                "q1",
+                &["tok1".to_string(), "tok2".to_string()],
+                800_000,
+            )
+            .unwrap();
+        assert_eq!(replayed, 800_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 200_000);
+
+        // A different quote has its own release record.
+        let released = inv
+            .release_backing_for_quote("q2", &["tok2".to_string()], 200_000)
+            .unwrap();
+        assert_eq!(released, 200_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 0);
+    }
+
+    #[test]
+    fn fifo_release_idempotent_per_quote() {
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000)]);
+        inv.allocate_vtxo_for_tokens("tok1", 600_000).unwrap();
+        inv.allocate_vtxo_for_tokens("tok2", 400_000).unwrap();
+
+        let released = inv
+            .release_backing_for_quote_fifo("q1", 800_000)
+            .unwrap();
+        assert_eq!(released, 800_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 200_000);
+        // Replay returns the recorded total without touching mappings.
+        let replayed = inv
+            .release_backing_for_quote_fifo("q1", 800_000)
+            .unwrap();
+        assert_eq!(replayed, 800_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 200_000);
+        // Partial release: the shortfall is reported in the total, never
+        // pretended away.
+        let partial = inv
+            .release_backing_for_quote_fifo("q2", 500_000)
+            .unwrap();
+        assert_eq!(partial, 200_000);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 0);
+    }
+
+    #[test]
+    fn fifo_zero_release_recorded_not_replayed_against_new_backing() {
+        // No mappings when the melt's release runs: the zero release is
+        // still recorded durably. Without that record a later retry would
+        // deallocate backing allocated AFTER the melt against the old
+        // quote.
+        let inv = inv_with(&[vtxo("a", 1_000_000, 900_000)]);
+        let released = inv.release_backing_for_quote_fifo("q1", 500_000).unwrap();
+        assert_eq!(released, 0);
+
+        inv.allocate_vtxo_for_tokens("tok1", 600_000).unwrap();
+        let replayed = inv.release_backing_for_quote_fifo("q1", 500_000).unwrap();
+        assert_eq!(replayed, 0);
+        assert_eq!(inv.total_allocated_msat().unwrap(), 600_000);
     }
 }

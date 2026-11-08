@@ -26,6 +26,7 @@ pub fn router(backend: AppState) -> Router {
         .route("/v1/melt/quote/bolt11/{quote_id}", get(get_melt_quote))
         .route("/v1/melt/bolt11", post(melt))
         .route("/v1/swap", post(swap))
+        .route("/v1/receipts/{quote_id}", get(receipts_for_quote))
         // Ark extensions
         .route("/ark/vtxo/{token_id}", get(token_vtxo))
         .route("/ark/exit", post(ark_exit))
@@ -106,6 +107,13 @@ async fn swap(
     Json(req): Json<SwapRequest>,
 ) -> Result<Json<SwapResponse>> {
     Ok(Json(b.swap(req).await?))
+}
+
+async fn receipts_for_quote(
+    State(b): State<AppState>,
+    Path(quote_id): Path<String>,
+) -> Result<Json<ReceiptsResponse>> {
+    Ok(Json(b.receipts_for_quote(&quote_id)?))
 }
 
 async fn token_vtxo(

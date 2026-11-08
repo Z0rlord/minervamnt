@@ -3,6 +3,7 @@
 //! Both Second barkd and an Arkade operator wallet can expose a compatible REST
 //! surface for board / refresh / exit when configured via `wallet_url`.
 
+use crate::ark_client::PayoutResult;
 use crate::bolt11_util::decode_invoice;
 use crate::error::{MintError, Result};
 use crate::types::{ExitResult, Vtxo};
@@ -227,12 +228,16 @@ impl WalletHttpClient {
         Ok(estimate.fee_sat)
     }
 
-    /// Pay a BOLT11 invoice via barkd and return the payment preimage (hex).
+    /// Pay a BOLT11 invoice via barkd and return the payout result.
     ///
     /// Outcome classification for the mint's reserve/settle/release flow:
     ///
-    /// - `Ok(preimage)`: the payment succeeded. The preimage is verified
-    ///   against the invoice's payment hash before being returned.
+    /// - `Ok(PayoutResult)`: the payment succeeded. The preimage is verified
+    ///   against the invoice's payment hash before being returned. The barkd
+    ///   wallet API does not report the fee actually paid on a completed
+    ///   payment (only a pre-payment estimate), so `fee_paid_sat` is `None`
+    ///   and the mint charges no fee, returning the whole reserve as NUT-08
+    ///   change: an unmeasured fee is never charged to the client.
     /// - [`MintError::PaymentFailed`]: the wallet's status endpoint reported
     ///   the current attempt's terminal "failed" state (with no earlier
     ///   success signal), and the mint has no record of a prior attempt on
@@ -244,6 +249,21 @@ impl WalletHttpClient {
     ///   history alone never settles and never fails a payment. The mint
     ///   holds the reservation for manual reconciliation on this path.
     pub async fn pay_lightning_invoice(
+        &self,
+        destination: &str,
+        amount_sat: u64,
+        attempted_before: bool,
+    ) -> Result<PayoutResult> {
+        let preimage = self
+            .pay_lightning_invoice_preimage(destination, amount_sat, attempted_before)
+            .await?;
+        Ok(PayoutResult {
+            preimage,
+            fee_paid_sat: None,
+        })
+    }
+
+    async fn pay_lightning_invoice_preimage(
         &self,
         destination: &str,
         amount_sat: u64,
@@ -1047,11 +1067,14 @@ mod wallet_server_tests {
             ..Default::default()
         })
         .await;
-        let preimage = client(&base)
+        let payout = client(&base)
             .pay_lightning_invoice(&test_invoice(500), 500, false)
             .await
             .unwrap();
-        assert_eq!(preimage, hex::encode(TEST_PREIMAGE));
+        assert_eq!(payout.preimage, hex::encode(TEST_PREIMAGE));
+        // The barkd wallet API reports no actual paid fee; unmeasured stays
+        // None so the mint charges nothing.
+        assert_eq!(payout.fee_paid_sat, None);
     }
 
     /// A preimage that does not hash to the payment hash is not a success.
